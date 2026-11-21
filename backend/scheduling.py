@@ -2,9 +2,10 @@
 
 import calendar
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
-INDIA_TIME = timezone(timedelta(hours=5, minutes=30))
+INDIA_TIME = ZoneInfo("Asia/Kolkata")
 MONTHS = {name.lower(): i for i, name in enumerate(calendar.month_name) if i}
 WEEKDAYS = {name.lower(): i for i, name in enumerate(calendar.day_name)}
 
@@ -21,6 +22,8 @@ def spoken_date(value: str, *, today: date) -> date:
         return today + timedelta(days=1)
     if value == "next week":
         return today + timedelta(weeks=1)
+    if value == "next month":
+        value = "in 1 month"
     relative = re.fullmatch(r"(?:in|after) (\d{1,3}) (days?|weeks?|months?)", value)
     if relative:
         count, unit = int(relative[1]), relative[2]

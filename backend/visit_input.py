@@ -29,8 +29,20 @@ def input_fields(text, *, today=None, waiting=None):
         else:
             issues["beneficiary_id"] = "Please repeat the beneficiary ID. It must contain exactly four numeric digits."
     plans = []
+    clear_vaccinations = False
     clauses = re.split(r"[;!?।\n]|\.(?!\d)|,\s*(?!\d{4}\b)", text)
     for clause in clauses:
+        clause = clause.strip()
+        if re.fullmatch(r"no (?:next visit|follow[ -]?up)(?: (?:is )?(?:required|needed|scheduled))?", clause, re.I):
+            patch["next_visit_date"] = None
+            issues.pop("next_visit_date", None)
+            continue
+        if re.fullmatch(r"no (?:vaccines?|vaccinations?|immuni[sz]ations?) (?:are )?due", clause, re.I):
+            plans.clear()
+            clear_vaccinations = True
+            issues.pop("vaccination_plans", None)
+            patch["vaccinations_due"] = []
+            continue
         date_match = VISIT_DATE.search(clause)
         if date_match:
             try:
@@ -45,8 +57,7 @@ def input_fields(text, *, today=None, waiting=None):
             continue
         name = vaccine["name"]
         if name and name.casefold() in {"this", "that", "some", "unknown", "a", "the"}:
-            issues["vaccination_plans"] = "Please clarify the vaccine name or provide only a vaccination follow-up date."
-            continue
+            name = None
         status = vaccine["status"].lower()
         tail = vaccine["tail"].strip()
         if status in {"given", "administered"}:
@@ -66,7 +77,9 @@ def input_fields(text, *, today=None, waiting=None):
             patch["next_visit_date"] = spoken_date(text.strip().rstrip(".!?"), today=today)
         except ValueError:
             pass
-    if plans:
+    if clear_vaccinations and not plans:
+        patch["vaccination_plans"] = []
+    elif plans:
         patch["vaccination_plans"] = plans
     if waiting == "weight_kg" or re.search(r"\b(?:kg|kilograms?)\b", text, re.I):
         weight = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(?:kg|kilograms?)?[.!]?\s*", text, re.I)

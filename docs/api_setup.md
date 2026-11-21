@@ -88,3 +88,13 @@ The preview uses locally bundled Leaflet 1.9.4 and OpenStreetMap tiles. Tiles ar
 7. Verify approval, sign-in, GPS capture, Save Visit, and sign-out with synthetic data. Confirm that a second worker cannot see or modify the first worker's records. Restart the Render service and verify persistence before relying on the deployment.
 
 Draft content remains in the existing in-memory server session. The browser stores only an account-scoped draft ID in session storage, which cannot authenticate a user. Re-authenticate as the same worker to resume while the server draft still exists. A server restart or draft expiry removes that recovery path.
+
+## Configure optional approximate address lookup
+
+Set `ASHA_REVERSE_GEOCODER_URL` to the HTTPS reverse endpoint of a private or contracted Nominatim-compatible service authorized to handle approximate visit locations. Keep the existing Gnani credentials and `DATA_KEY`. The public OpenStreetMap Nominatim endpoint is intentionally rejected because visit locations are sensitive. The public service prohibits submitting personal or confidential data. [Public Nominatim usage policy](https://operations.osmfoundation.org/policies/nominatim/) Leave the setting empty for GPS coordinates and maps without address lookup.
+
+The worker opts into address lookup before capture or refresh. After GPS permission succeeds, ASHA sends coordinates rounded to two decimal places and requests a locality-level result. The backend limits lookup to one request per second per app process and caches successful results in memory for 24 hours, up to 512 entries. Confirm that the configured service's contract permits this retention and traffic. Failed or busy lookups leave coordinates available for saving. Map tiles remain separately opt-in. No lookup credentials are sent to the browser.
+
+Addresses are stored in the same encrypted visit payload. Existing payloads need no migration. On Render, retain the persistent `DATABASE_PATH`, then verify a synthetic visit with and without consent and restart the service to check persistence.
+
+For spoken dates, **next month** means one calendar month from the current Asia/Kolkata date, clamped to the last day of the destination month. During review, enter a corrected next-visit date or select **No follow-up required** to clear an invalid spoken date.

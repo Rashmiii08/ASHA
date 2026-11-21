@@ -88,3 +88,4 @@ input,select,textarea{width:100%;border:1px solid #aebfb5;border-radius:9px;padd
 #account-submit{margin-top:14px}
 .account-row{border-top:1px solid #d9e4df;padding:12px 0;display:grid;gap:8px}
 #admin-reset-code{overflow-wrap:anywhere}
+#address-consent,#no-next-visit,#no-vaccinations-due{width:auto;min-height:0}

@@ -23,10 +23,11 @@ from .auth import Accounts, COOKIE
 from .auth_routes import identity, mutation, router as auth_router
 from .db import Register, demo_key
 from .dialogue import Dialogue
+from .geocoding import ReverseGeocoder
 from .gnani.adapter import load_voice
 from .gnani.provider import GnaniProtocolError, GnaniUpgradeError, PrismaStream
 from .llm import configured_gemini
-from .schemas import Language, VisitLocationCapture, VisitReview
+from .schemas import Language, StoredVisitLocation, VisitLocationCapture, VisitReview
 from .terminology import TERMS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,13 @@ def create_live_app():
             lambda: Register(path, key.encode() if key else demo_key(path.with_suffix(".key")))
         )
         app.state.password_slots = asyncio.Semaphore(2)
+        geocoder_url = os.getenv("ASHA_REVERSE_GEOCODER_URL")
+        app.state.geocoder = None
+        if geocoder_url:
+            try:
+                app.state.geocoder = ReverseGeocoder(geocoder_url)
+            except ValueError:
+                LOG.warning("Reverse geocoding is disabled because its endpoint configuration is invalid.")
         app.state.accounts = await run_in_threadpool(Accounts, app.state.register)
         app.state.voice = None
         app.state.voice_error = None
@@ -106,7 +114,7 @@ def create_live_app():
     async def status(request: Request):
         await identity(request, "worker")
         return {"mode": mode, "voice_ready": bool(app.state.voice), "voice_error": app.state.voice_error,
-                "gemini_configured": bool(app.state.gemini)}
+                "gemini_configured": bool(app.state.gemini), "address_lookup": app.state.geocoder is not None}
 
     @app.get("/api/visits")
     async def visits(request: Request):
@@ -198,12 +206,13 @@ def create_live_app():
                 "type": "update", "state": dialogue.state,
                 "form": {**dialogue.visit.model_dump(mode="json"), "reported_conditions": dialogue.condition_details()},
                 "revision": session.revision,
-                "location": dialogue.location.model_dump(mode="json") if secure_location_transport and dialogue.location else None,
+                "location": dialogue.location.model_dump(mode="json", exclude_none=True) if secure_location_transport and dialogue.location else None,
                 "review": {
                     "concern_catalog": list(TERMS),
                     "pending_diagnoses": dialogue.pending_diagnoses(),
                     "needs_clarification": dialogue.needs_clarification,
                     "blockers": dialogue.save_blockers(),
+                    "field_issues": dialogue.field_issues,
                     "transcript_correction": dialogue.transcript_correction,
                 },
                 "danger_flag": bool(dialogue.danger), "latency_ms": latency,
@@ -314,9 +323,15 @@ def create_live_app():
                     except ValidationError:
                         await send({"type": "location_error", "message": "The GPS reading was invalid. Try refreshing the location."})
                         continue
-                    dialogue.location = capture.location
-                    await send({"type": "visit_location", "request_id": capture.request_id,
-                                "location": capture.location.model_dump(mode="json")})
+                    address = None
+                    if capture.address_consent and app.state.geocoder:
+                        address = await app.state.geocoder.lookup(capture.location.latitude, capture.location.longitude)
+                    dialogue.location = StoredVisitLocation(**capture.location.model_dump(), address=address)
+                    response = {"type": "visit_location", "request_id": capture.request_id,
+                                "location": dialogue.location.model_dump(mode="json", exclude_none=True)}
+                    if capture.address_consent:
+                        response["address_unavailable"] = address is None
+                    await send(response)
                 elif kind in ("edit_visit", "confirm_visit"):
                     if dialogue.state == "SAVED":
                         await update()

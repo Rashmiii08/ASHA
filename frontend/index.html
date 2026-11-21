@@ -115,6 +115,7 @@
           <div class="card session">
             <div class="section-header"><h2>Voice session</h2><span class="status-chip" id="phase" role="status">Ready</span></div>
             <p class="muted" id="location-consent">Starting a visit requests one GPS reading. Allow it to attach the location to this visit, or decline and continue without location.</p>
+            <label id="address-consent-label" hidden><input id="address-consent" type="checkbox"> Look up an approximate address. This shares a rounded location with the configured map provider.</label>
             <div class="microphone"><button id="start-voice" class="mic-button" aria-label="Start voice visit" aria-describedby="location-consent">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-3 0h6"/></svg>
             </button><canvas id="wave" height="52" width="320" aria-hidden="true"></canvas></div>
@@ -149,6 +150,7 @@
               <h3 id="visit-location-heading">Visit Location</h3>
               <p id="location-status" role="status">Start a visit to request location.</p>
               <dl id="location-details" hidden>
+                <div id="location-address-row" hidden><dt>Approximate address</dt><dd><span id="location-address"></span><br><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a></dd></div>
                 <div><dt>Latitude</dt><dd id="location-latitude"></dd></div>
                 <div><dt>Longitude</dt><dd id="location-longitude"></dd></div>
                 <div><dt>Accuracy</dt><dd id="location-accuracy"></dd></div>
@@ -192,8 +194,10 @@
                 <label for="edit-systolic">Systolic blood pressure (mmHg)</label><input id="edit-systolic" type="number" min="30" max="300">
                 <label for="edit-diastolic">Diastolic blood pressure (mmHg)</label><input id="edit-diastolic" type="number" min="15" max="200">
                 <label for="edit-next-visit">Next visit date</label><input id="edit-next-visit" type="date">
+                <label><input id="no-next-visit" type="checkbox"> No follow-up required</label>
                 <label for="edit-vaccinations">Vaccinations due (comma-separated)</label><input id="edit-vaccinations" maxlength="656">
                 <fieldset><legend>Vaccination schedule</legend>
+                  <label><input id="no-vaccinations-due" type="checkbox"> No vaccinations due</label>
                   <div id="edit-vaccination-plans"></div>
                   <button id="add-vaccination-plan" type="button" class="secondary">Add vaccination</button>
                 </fieldset>
@@ -215,7 +219,7 @@
       </section>
       <section id="history" hidden>
         <div class="page-intro"><h1>Visit history</h1><p>Find confirmed home visits by beneficiary ID or visit type.</p></div>
-        <div class="card"><label for="search">Search visits</label><input type="search" id="search" placeholder="Beneficiary ID or visit type"><div id="records"></div></div>
+        <div class="card"><label for="search">Search visits</label><input type="search" id="search" placeholder="Beneficiary ID or visit type"><div id="records"></div><p id="history-address-attribution" class="muted" hidden>Address data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a></p></div>
       </section>
       <section id="followups" hidden>
         <div class="page-intro"><h1>Follow-ups</h1><p>Review upcoming and completed follow-ups.</p></div>

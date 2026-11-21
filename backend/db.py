@@ -77,7 +77,7 @@ class Register:
             **visit.model_dump(mode="json"),
             "transcript": dialogue.notes,
             "transcript_correction": dialogue.transcript_correction,
-            "location": dialogue.location.model_dump(mode="json") if dialogue.location else None,
+            "location": dialogue.location.model_dump(mode="json", exclude_none=True) if dialogue.location else None,
             "reported_conditions": dialogue.condition_details(),
             "danger_flag": bool(dialogue.danger),
             "danger_signs": sorted(dialogue.danger),

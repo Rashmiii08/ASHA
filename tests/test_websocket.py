@@ -253,3 +253,68 @@ def test_visit_can_be_saved_without_location(client):
         ws.send_json({"type": "confirm_visit", "revision": draft["revision"]})
         assert ws.receive_json()["state"] == "SAVED"
     assert client.get("https://testserver/api/visits").json()[0]["location"] is None
+
+
+@pytest.mark.parametrize("correct_to", [None, "2099-12-01"])
+def test_invalid_voice_date_can_be_reviewed_and_saved(client, correct_to):
+    with client.websocket_connect("/ws") as ws:
+        start(ws)
+        draft = turn(ws, "Beneficiary ID 1234. General health visit. Next visit on 03/04.")
+        assert "next_visit_date" in draft["review"]["field_issues"]
+        ws.send_json({"type": "pause_capture"})
+        assert ws.receive_json()["type"] == "capture_paused"
+        ws.send_json({
+            "type": "confirm_visit", "revision": draft["revision"], "beneficiary_id": "1234",
+            "visit_type": "general_health", "retained_conditions": [], "next_visit_date": correct_to,
+        })
+        assert ws.receive_json()["state"] == "SAVED"
+        ws.send_json({"type": "confirm_visit", "revision": draft["revision"]})
+        assert ws.receive_json()["state"] == "SAVED"
+    record, = client.get("/api/visits").json()
+    assert record["next_visit_date"] == correct_to
+    assert [item["date"] for item in record["followups"]] == ([correct_to] if correct_to else [])
+
+
+def test_voice_clears_optional_reminders_and_keeps_vaccines_given(client):
+    with client.websocket_connect("/ws") as ws:
+        start(ws)
+        turn(ws, "Beneficiary ID 1234. General health visit. Next visit after 7 days.")
+        turn(ws, "BCG vaccine was given. Vaccination due next month.")
+        draft = turn(ws, "No follow-up required. No vaccinations due.")
+        assert draft["form"]["next_visit_date"] is None
+        assert draft["form"]["vaccination_plans"] == [{"name": "BCG", "status": "given", "due_date": None}]
+        ws.send_json({"type": "confirm_visit", "revision": draft["revision"]})
+        assert ws.receive_json()["state"] == "SAVED"
+    record, = client.get("/api/visits").json()
+    assert record["followups"] == []
+
+
+@pytest.mark.parametrize("address", ["Synthetic Village, Karnataka", None])
+def test_geocoding_requires_consent_and_retains_coordinates(client, monkeypatch, address):
+    calls = []
+
+    class Provider:
+        async def lookup(self, latitude, longitude):
+            calls.append((latitude, longitude))
+            return address
+
+    monkeypatch.setattr(client.app.state, "geocoder", Provider())
+    point = {"latitude": 12.345678, "longitude": 76.54321, "accuracy_m": 8,
+             "captured_at": "2026-11-22T09:00:00Z"}
+    with client.websocket_connect("/ws") as ws:
+        start(ws)
+        request = {"type": "set_visit_location", "request_id": 1, "location": point}
+        ws.send_json(request)
+        assert ws.receive_json()["location"] == point
+        assert calls == []
+        ws.send_json({**request, "request_id": 2, "address_consent": True})
+        result = ws.receive_json()
+        assert result["location"]["latitude"] == point["latitude"]
+        assert result["location"].get("address") == address
+        assert result["address_unavailable"] == (address is None)
+        draft = turn(ws, "Beneficiary ID 1234. General health visit.")
+        ws.send_json({"type": "confirm_visit", "revision": draft["revision"]})
+        assert ws.receive_json()["state"] == "SAVED"
+    record, = client.get("/api/visits").json()
+    assert record["location"]["longitude"] == point["longitude"]
+    assert record["location"].get("address") == address

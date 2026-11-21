@@ -86,3 +86,13 @@ def test_dialogue_retains_collective_draft_and_accepts_weight_correction():
         assert dialogue.visit.visit_type == "newborn"
 
     asyncio.run(exercise())
+
+
+def test_optional_schedule_phrases_and_next_month():
+    fields, issues = input_fields("No follow-up required. No vaccinations due.", today=date(2026, 1, 31))
+    assert not issues
+    assert fields == {"next_visit_date": None, "vaccinations_due": [], "vaccination_plans": []}
+    fields, issues = input_fields("Vaccination due next month.", today=date(2026, 1, 31))
+    assert not issues
+    plan, = fields["vaccination_plans"]
+    assert plan.name is None and plan.due_date == date(2026, 2, 28)

@@ -56,10 +56,17 @@ async function save(page) {
     await page.getByRole("button", {name: "Zoom in"}).click();
     assert.ok(tileRequests > 0);
     assert.ok(!(await page.evaluate(() => JSON.stringify(Object.values(sessionStorage)))).includes("12.345678"));
+    if (process.env.ASHA_TEST_GEOCODER) {
+      await page.getByRole("checkbox", {name:/Look up an approximate address/}).check();
+      assert.ok(await page.locator("#location-address-row").isHidden());
+    }
     await context.setGeolocation({latitude: 13.234567, longitude: 77.54321, accuracy: 9});
     await page.getByRole("button", {name: "Refresh Location"}).click();
     await page.locator("#location-latitude").getByText("13.234567").waitFor();
     await page.getByText("GPS location attached to this visit.").waitFor();
+    if (process.env.ASHA_TEST_GEOCODER) {
+      await page.locator("#location-address").getByText("Synthetic Village, Karnataka").waitFor();
+    }
     await page.reload();
     await page.getByRole("button", {name: "Start voice visit"}).click();
     await page.locator("#location-latitude").getByText("13.234567").waitFor();
@@ -73,6 +80,7 @@ async function save(page) {
     assert.ok(savedMap.includes("mlat=13.234567"));
     await page.reload();
     await item.getByRole("link", {name:"Open saved location map"}).waitFor();
+    if (process.env.ASHA_TEST_GEOCODER) await item.getByText("Synthetic Village, Karnataka").waitFor();
     await context.close();
 
     for (const [code, message, id] of [

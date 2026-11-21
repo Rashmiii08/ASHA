@@ -197,3 +197,29 @@ def test_reset_expiration_and_privileged_admin_recovery(app_client):
     client.app.state.accounts.recover_admin(ADMIN["worker_id"], password)
     assert client.app.state.accounts.session(admin_session) is None
     assert login(client, ADMIN["worker_id"], password).status_code == 200
+
+
+def test_saved_visit_survives_application_restart(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("APP_MODE", "demo")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "persistent.db"))
+    monkeypatch.setenv("DATA_KEY", Fernet.generate_key().decode())
+    with TestClient(create_live_app(), base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
+        register(client, WORKER)
+        worker, = client.app.state.accounts.list_workers()
+        client.app.state.accounts.manage_worker(worker["id"], "active", worker["village"])
+        assert login(client, WORKER["worker_id"]).status_code == 200
+        with client.websocket_connect("wss://testserver/ws") as ws:
+            ws.send_json({"type": "hello"})
+            assert [ws.receive_json()["type"] for _ in range(3)] == ["ready", "update", "assistant"]
+            ws.send_json({"type": "demo_transcript", "text": "Beneficiary ID 1234. General health visit."})
+            assert [ws.receive_json()["type"] for _ in range(2)] == ["transcript", "phase"]
+            revision = ws.receive_json()["revision"]
+            assert ws.receive_json()["type"] == "assistant"
+            ws.send_json({"type": "confirm_visit", "revision": revision})
+            assert ws.receive_json()["state"] == "SAVED"
+        original, = client.get("/api/visits").json()
+    with TestClient(create_live_app(), base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
+        assert login(client, WORKER["worker_id"]).status_code == 200
+        assert client.get("/api/visits").json() == [original]

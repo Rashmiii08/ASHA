@@ -73,6 +73,9 @@ function renderLocation() {
   const point = pendingLocation?.location ?? visitLocation;
   $("location-status").textContent = locationStatus;
   $("location-details").hidden = !point;
+  $("address-consent-label").hidden = !config?.address_lookup;
+  $("location-address-row").hidden = !point?.address;
+  $("location-address").textContent = point?.address ?? "";
   $("map-privacy").hidden = !point;
   $("show-location-map").hidden = !point;
   $("show-location-map").textContent = locationMap ? "Hide map" : "Show map";
@@ -127,6 +130,7 @@ function captureLocation() {
     renderLocation();
     return;
   }
+  const addressConsent = !!config?.address_lookup && $("address-consent").checked;
   locating = true;
   locationStatus = "Waiting for location permission and a GPS reading…";
   renderLocation();
@@ -150,10 +154,11 @@ function captureLocation() {
       }
       locating = false;
       pendingLocation = {
-        type: "set_visit_location", request_id: requestId,
+        type: "set_visit_location", request_id: requestId, address_consent: addressConsent,
         location: {latitude, longitude, accuracy_m: accuracy, captured_at: timestamp.toISOString()},
       };
-      locationStatus = "GPS reading captured. Waiting for the visit to receive it.";
+      locationStatus = addressConsent ? "GPS captured. Looking up the approximate address…" :
+        "GPS reading captured. Waiting for the visit to receive it.";
       renderLocation();
       transmit(pendingLocation);
     }, failed, {enableHighAccuracy: true, timeout: 10000, maximumAge: 0});
@@ -264,7 +269,9 @@ function renderDetails() {
     option.value = term;
     $("add-concern").append(option);
   }
-  $("edit-next-visit").value = draft.next_visit_date ?? "";
+  $("edit-next-visit").value = reviewInfo.field_issues?.next_visit_date ? "" : (draft.next_visit_date ?? "");
+  $("no-next-visit").checked = false;
+  $("no-vaccinations-due").checked = false;
   $("edit-vaccinations").value = (draft.vaccinations_due ?? []).join(", ");
   $("edit-transcript").value = reviewInfo.transcript_correction ?? "";
   $("exclude-unclear-label").hidden = !reviewInfo.needs_clarification;
@@ -297,7 +304,8 @@ function list(target, data, empty, followup = false) {
     }
     row.append(name, date);
     if (target === $("records") && item.location) {
-      const {latitude, longitude} = item.location;
+      const {latitude, longitude, address} = item.location;
+      if (address) date.append(node("small", address));
       if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
         const map = node("a", "Open saved location map");
         map.href = `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}#map=16/${latitude}/${longitude}`;
@@ -333,6 +341,7 @@ function renderRecords() {
   const query = $("search").value.trim().toLowerCase();
   const empty = online ? "No confirmed visits yet." : "Connect to load confirmed visits.";
   list($("recent"), records.slice(0, 4), empty);
+  $("history-address-attribution").hidden = !records.some(item => item.location?.address);
   list($("records"), records.filter(r => `${r.beneficiary_id} ${visitTypeLabel(r.visit_type)}`.toLowerCase().includes(query)),
     query ? "No visits match your search." : empty);
   list($("dashboard-followups"), followups.filter(item => !item.scheduled.completed).slice(0, 4),
@@ -696,7 +705,9 @@ function receive(message) {
       if (message.request_id === pendingLocation?.request_id) {
         visitLocation = message.location;
         pendingLocation = null;
-        if (!locating) locationStatus = "GPS location attached to this visit.";
+        if (!locating) locationStatus = message.address_unavailable
+          ? "Address unavailable. Captured GPS coordinates are attached and can be saved."
+          : "GPS location attached to this visit.";
         renderLocation();
       }
       break;
@@ -1014,6 +1025,7 @@ function pauseForReview() {
 }
 
 function stop(preserveDraft = false) {
+  $("address-consent").checked = false;
   locationRequest += 1;
   locating = false;
   pendingLocation = null;
@@ -1105,6 +1117,10 @@ function submitReview(type) {
     const [name, status, due] = row.querySelectorAll("input, select");
     return {name: name.value.trim() || null, status: status.value, due_date: due.disabled ? null : due.value || null};
   });
+  const noNext = $("no-next-visit").checked;
+  const noVaccinations = $("no-vaccinations-due").checked;
+  const nextDate = noNext ? null : $("edit-next-visit").value || null;
+  const plans = noVaccinations ? vaccinationPlans.filter(plan => plan.status === "given") : vaccinationPlans;
   const diagnosisAnswers = Object.fromEntries([...$("edit-concern-list").querySelectorAll("select[data-diagnosis]")]
     .filter(select => retained.includes(select.dataset.diagnosis) && select.value)
     .map(select => [select.dataset.diagnosis, select.value === "yes"]));
@@ -1116,18 +1132,20 @@ function submitReview(type) {
     visit_type: $("edit-visit-type").value || null,
     ...Object.fromEntries(Object.entries(measurementEditors).map(([field, id]) =>
       [field, $(id).value === "" ? null : Number($(id).value)])),
-    next_visit_date: $("edit-next-visit").value || null,
-    vaccinations_due: $("edit-vaccinations").value.split(",").map(value => value.trim()).filter(Boolean),
+    ...(nextDate || noNext || !reviewInfo.field_issues?.next_visit_date ? {next_visit_date: nextDate} : {}),
+    vaccinations_due: noVaccinations ? [] : $("edit-vaccinations").value.split(",").map(value => value.trim()).filter(Boolean),
     transcript_correction: $("edit-transcript").value || null,
     retained_conditions: retained,
     retained_contextual_conditions: selected.filter(input => input.dataset.subject).map(input => input.value),
-    vaccination_plans: vaccinationPlans,
+    ...(plans.some(plan => plan.status === "due") || noVaccinations || !reviewInfo.field_issues?.vaccination_plans ? {vaccination_plans: plans} : {}),
     added_conditions: $("add-concern").value ? [$("add-concern").value] : [],
     diagnosis_answers: diagnosisAnswers,
     exclude_unclear_report: $("exclude-unclear").checked,
   });
 }
 
+$("edit-next-visit").oninput = () => { $("no-next-visit").checked = false; };
+$("no-next-visit").onchange = () => { if ($("no-next-visit").checked) $("edit-next-visit").value = ""; };
 $("add-vaccination-plan").onclick = () => $("edit-vaccination-plans").append(vaccinationRow());
 $("edit-visit").onsubmit = event => {
   event.preventDefault();

@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from .danger import OTHER_SUBJECT, assess, newborn_clauses
 from .phrases import PHRASES
 from .scheduling import local_today
-from .schemas import NEWBORN_WEIGHT_MAX_KG, Extraction, Visit, VisitLocation, VisitReview
+from .schemas import NEWBORN_WEIGHT_MAX_KG, Extraction, Visit, StoredVisitLocation, VisitReview
 from .visit_input import input_fields
 from .terminology import CAREGIVER, DIAGNOSIS_QUESTIONS, PATIENT_SPEAKER, TERMS, family_reports, reported_terms
 
@@ -97,7 +97,7 @@ class Dialogue:
     caregiver_speaking: bool = False
     awaiting_other_concerns: bool = False
     transcript_correction: str | None = None
-    location: VisitLocation | None = None
+    location: StoredVisitLocation | None = None
     field_issues: dict[str, str] = field(default_factory=dict)
     attributed_conditions: dict[tuple[str, str], str] = field(default_factory=dict)
 
@@ -138,7 +138,7 @@ class Dialogue:
             raise ValueError("Follow-up dates must be today or later.")
         self.visit = visit
         for name, value in changes.items():
-            if value is not None:
+            if value is not None or name == "next_visit_date":
                 self.field_issues.pop(name, None)
         if review.retained_contextual_conditions is not None:
             retained = set(review.retained_contextual_conditions)
@@ -250,7 +250,7 @@ class Dialogue:
         problems = {}
         try:
             local = deterministic(text, issues=problems, waiting=next(iter(self.field_issues), "weight_kg" if self.visit.visit_type == "newborn" and self.visit.weight_kg is None else None))
-            local_patch = local.patch.model_dump(exclude_unset=True, exclude_none=True)
+            local_patch = local.patch.model_dump(exclude_unset=True)
             result = local
             if extract:
                 try:
@@ -270,7 +270,9 @@ class Dialogue:
                     if self.visit.weight_kg is not None and self.visit.weight_kg > NEWBORN_WEIGHT_MAX_KG:
                         patch["weight_kg"] = None
             if "vaccination_plans" in patch:
-                plans = {plan.name: plan.model_dump() for plan in self.visit.vaccination_plans}
+                clearing_due = not patch["vaccination_plans"]
+                plans = {plan.name: plan.model_dump() for plan in self.visit.vaccination_plans
+                         if not clearing_due or plan.status != "due"}
                 plans.update({plan["name"]: plan for plan in patch["vaccination_plans"]})
                 patch["vaccination_plans"] = list(plans.values())
             if GENERAL_HEALTH.search(text) and patch.get("visit_type") in (None, "other", "general_health"):
@@ -290,7 +292,7 @@ class Dialogue:
 
         self.visit = merged
         for name, value in patch.items():
-            if value is not None:
+            if value is not None or name == "next_visit_date":
                 self.field_issues.pop(name, None)
         self.field_issues.update(problems)
         # Preserve affirmative symptom evidence for the visit. Temperature is
@@ -315,8 +317,11 @@ class Dialogue:
             acknowledgements.append(f"Beneficiary ID {' '.join(self.visit.beneficiary_id)} recorded.")
         if patch.get("weight_kg") is not None:
             acknowledgements.append(f"Weight recorded as {self.visit.weight_kg:g} kilograms.")
-        if patch.get("next_visit_date"):
-            acknowledgements.append(f"Next visit scheduled for {self.visit.next_visit_date:%d %B %Y}.")
+        if "next_visit_date" in patch:
+            acknowledgements.append(f"Next visit scheduled for {self.visit.next_visit_date:%d %B %Y}."
+                                    if self.visit.next_visit_date else "No next-visit follow-up recorded.")
+        if local_patch.get("vaccination_plans") == []:
+            acknowledgements.append("No vaccinations due recorded.")
         if local_patch.get("vaccination_plans"):
             for plan in local.patch.vaccination_plans:
                 label = f"{plan.name} vaccination" if plan.name else "Vaccination"

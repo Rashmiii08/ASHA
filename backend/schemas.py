@@ -98,9 +98,14 @@ class VisitLocation(BaseModel):
         return value
 
 
+class StoredVisitLocation(VisitLocation):
+    address: str | None = Field(default=None, max_length=300)
+
+
 class VisitLocationCapture(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["set_visit_location"]
     request_id: int = Field(strict=True, ge=1)
     location: VisitLocation
+    address_consent: bool = Field(default=False, strict=True)
