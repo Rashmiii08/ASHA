@@ -247,9 +247,10 @@ def test_prisma_commit_flushes_remaining_samples_and_logs_levels(caplog):
         await stream.finish_utterance()
 
     asyncio.run(exercise())
-    assert socket.sent == [speech, b"\x00\x40" * 3 + bytes(1018), '{"type": "commit"}']
+    assert socket.sent[:2] == [speech, b"\x00\x40" * 3 + bytes(1018)]
+    assert socket.sent[2:] == [bytes(1024)] * 32
     assert "silent_frames_window=0 max_rms_dbfs=-6.0 peak_dbfs=-6.0" in caplog.text
-    assert "Prisma utterance commit sent" in caplog.text
+    assert "Prisma utterance ended with paced silence frames" in caplog.text
 
 
 def test_prisma_paces_binary_frames_from_legacy_batches():
