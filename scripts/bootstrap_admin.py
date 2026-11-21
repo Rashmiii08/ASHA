@@ -6,9 +6,9 @@ import sys
 from getpass import getpass
 
 from dotenv import load_dotenv
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
-from backend.auth import Account, Accounts
+from backend.auth import Account, Accounts, IndianMobile
 from backend.db import Register
 from backend.live import ROOT
 
@@ -31,24 +31,28 @@ def main():
         if password != getpass("Repeat password: "):
             raise SystemExit("Passwords must match.")
         try:
-            accounts.recover_admin(worker_id, password)
+            replacement = input("Verified replacement mobile number (blank to keep the current number): ").strip()
+            phone = TypeAdapter(IndianMobile).validate_python(replacement) if replacement else None
+            accounts.recover_admin(worker_id, password, phone)
+        except ValidationError:
+            raise SystemExit("Enter a 10-digit Indian mobile number, with optional +91.") from None
         except ValueError as exc:
             raise SystemExit(str(exc)) from None
         print("Administrator password reset and previous sessions revoked.")
         return
     try:
         administrator = Account(
-            full_name=input("Full name: "), worker_id=input("Administrator ID: "), phone=input("Mobile number: "),
+            full_name=input("Full name: "), phone=input("Mobile number: "),
             village=input("Assigned area: "), password=getpass("Password (at least 12 characters): "),
             confirm_password=getpass("Repeat password: "),
         )
     except ValidationError:
         raise SystemExit("The account fields did not pass validation.") from None
     try:
-        accounts.create(administrator, bootstrap=True)
+        worker_id = accounts.create(administrator, bootstrap=True)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
-    print("Administrator created.")
+    print(f"Administrator created. Sign in with the mobile number. Recovery ID: {worker_id}")
 
 
 if __name__ == "__main__":

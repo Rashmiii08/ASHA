@@ -13,7 +13,7 @@ accounts = Accounts(Register(path, demo_key(path.with_suffix(".key"))))
 password = os.environ["ASHA_TEST_PASSWORD"]
 profile = dict(full_name="Synthetic Worker", phone="9876543210", village="Test area",
                password=password, confirm_password=password)
-accounts.create(Account(worker_id="BROWSER-WORKER", **profile))
+accounts.create(Account(**profile))
 worker, = accounts.list_workers()
 accounts.manage_worker(worker["id"], "active", profile["village"])
-accounts.create(Account(worker_id="BROWSER-ADMIN", **{**profile, "full_name": "Synthetic Administrator"}), bootstrap=True)
+accounts.create(Account(**{**profile, "phone": "9876543211", "full_name": "Synthetic Administrator"}), bootstrap=True)

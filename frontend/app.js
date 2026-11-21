@@ -486,7 +486,8 @@ function showAccountPage(page) {
   $("account-title").textContent = labels[page];
   $("account-submit").textContent = labels[page];
   $("registration-fields").hidden = page !== "register";
-  $("worker-id-field").hidden = page === "reset";
+  $("mobile-field").hidden = page === "reset";
+  $("account-phone").autocomplete = page === "register" ? "tel" : "username";
   $("reset-code-field").hidden = page !== "reset";
   $("password-field").hidden = page === "forgot";
   $("confirm-password-field").hidden = !["register", "reset"].includes(page);
@@ -513,6 +514,10 @@ async function loadAdministration() {
         const village = node("input");
         village.setAttribute("aria-label", `Area for ${worker.worker_id}`);
         village.value = worker.village;
+        const mobile = node("input");
+        mobile.type = "tel";
+        mobile.setAttribute("aria-label", `Mobile number for ${worker.worker_id}`);
+        mobile.value = worker.phone;
         const status = node("select");
         status.setAttribute("aria-label", `Status for ${worker.worker_id}`);
         for (const text of ["pending", "active", "inactive"]) {
@@ -522,8 +527,13 @@ async function loadAdministration() {
         }
         status.value = worker.status;
         const apply = node("button", "Save worker assignment", "secondary");
-        apply.onclick = () => adminAction(`/api/auth/workers/${worker.id}`, "PATCH", {village: village.value, status: status.value});
-        row.append(village, status, apply);
+        apply.onclick = () => {
+          if (mobile.value.trim() !== worker.phone && !confirm("Have you independently verified the worker’s new mobile number?")) return;
+          void adminAction(`/api/auth/workers/${worker.id}`, "PATCH", {
+            village: village.value, status: status.value, phone: mobile.value.trim(),
+          });
+        };
+        row.append(village, mobile, status, apply);
       }
       if (worker.reset_requested) {
         const issue = node("button", "Issue reset code", "secondary");
@@ -1193,13 +1203,12 @@ $("account-form").onsubmit = async event => {
   event.preventDefault();
   const page = accountPage;
   const values = {};
-  if (page !== "reset") values.worker_id = $("account-id").value.trim();
+  if (page !== "reset") values.phone = $("account-phone").value.trim();
   if (page !== "forgot") values.password = $("account-password").value;
   if (page === "register" || page === "reset") values.confirm_password = $("account-confirm").value;
   if (page === "reset") values.code = $("account-code").value.trim();
   if (page === "register") {
     values.full_name = $("account-name").value;
-    values.phone = $("account-phone").value.trim();
     values.village = $("account-village").value;
   }
   $("account-submit").disabled = true;
@@ -1209,7 +1218,10 @@ $("account-form").onsubmit = async event => {
     registered = page === "register";
     if (result.user) setUser(result.user);
     else {
-      if (page === "reset") showAccountPage("login");
+      if (page === "reset" || page === "register") {
+        showAccountPage("login");
+        if (page === "register") $("account-phone").value = values.phone;
+      }
       $("account-message").textContent = result.message;
     }
   } catch (error) {

@@ -40,11 +40,12 @@
           <form id="account-form">
             <div id="registration-fields" hidden>
               <label for="account-name">Full name</label><input id="account-name" autocomplete="name" maxlength="100">
-              <label for="account-phone">Mobile number</label><input id="account-phone" type="tel" autocomplete="tel" maxlength="13">
               <label for="account-village">Assigned village or area</label><input id="account-village" maxlength="100">
             </div>
-            <div id="worker-id-field">
-              <label for="account-id">Worker ID</label><input id="account-id" autocomplete="username" maxlength="32">
+            <div id="mobile-field">
+              <label for="account-phone">Mobile number</label>
+              <input id="account-phone" type="tel" inputmode="tel" autocomplete="username" aria-describedby="mobile-hint">
+              <small id="mobile-hint">10-digit Indian mobile number, with optional +91</small>
             </div>
             <div id="reset-code-field" hidden>
               <label for="account-code">Reset code from your administrator</label><input id="account-code" autocomplete="one-time-code" maxlength="43">

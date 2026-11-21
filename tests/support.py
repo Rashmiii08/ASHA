@@ -7,7 +7,7 @@ from backend.auth import Account
 ORIGIN = "https://testserver"
 PASSWORD = "synthetic-regression-password"
 WORKER = {
-    "full_name": "Synthetic Worker", "worker_id": "TEST-WORKER", "phone": "9876543210",
+    "full_name": "Synthetic Worker", "phone": "9876543210",
     "village": "Synthetic Area", "password": PASSWORD, "confirm_password": PASSWORD,
 }
 
@@ -22,7 +22,7 @@ class TestClient(BaseClient):
         accounts.create(Account.model_validate(WORKER))
         user, = accounts.list_workers()
         accounts.manage_worker(user["id"], "active", user["village"])
-        assert self.post("/api/auth/login", json={"worker_id": WORKER["worker_id"], "password": PASSWORD}).status_code == 200
+        assert self.post("/api/auth/login", json={"phone": WORKER["phone"], "password": PASSWORD}).status_code == 200
         return self
 
     def websocket_connect(self, url, **kwargs):

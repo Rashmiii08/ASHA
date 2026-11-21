@@ -17,7 +17,7 @@ Copy-Item .env.example .env
 .\.venv\Scripts\python.exe -m uvicorn backend.live:create_live_app --factory --host 127.0.0.1 --port 8765 --ws-max-size 32768 --ssl-certfile data/local.pem --ssl-keyfile data/local-key.pem
 ```
 
-Copy the example only on first setup. With your localhost certificate stored at the paths above, open `https://localhost:8765`. Register a worker account, approve it using the administrator account, then sign in as the worker. Select a language and use **Start voice visit**, then **Use sample** and **Send transcript**. The demo displays the assistant's reply as text. Use `Ctrl+C` in the terminal to stop the server.
+Copy the example only on first setup. With your localhost certificate stored at the paths above, open `https://localhost:8765`. Register a worker account, then sign in with its mobile number and password. Select a language and use **Start voice visit**, then **Use sample** and **Send transcript**. The demo displays the assistant's reply as text. Use `Ctrl+C` in the terminal to stop the server.
 
 For macOS or Linux, create the environment with `python3.12 -m venv .venv` and use `.venv/bin/python` in place of the Windows Python path. On port conflicts, use `Get-NetTCPConnection -LocalPort 8765 -State Listen` and inspect `OwningProcess` with `Get-Process -Id <number>`, or choose another port and update the browser address. Microphone capture and PWA installation require localhost or a secure HTTPS origin. The app requires authenticated accounts and HTTPS. Use synthetic data and obtain a security review before handling real patient data.
 

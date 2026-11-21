@@ -1,10 +1,12 @@
 """Account and session storage for the ASHA register."""
 
 import hashlib
+import hmac
 import json
 import secrets
 import sqlite3
 import time
+from uuid import uuid4
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
@@ -19,11 +21,25 @@ PASSWORDS = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=2)
 DUMMY_HASH = PASSWORDS.hash(secrets.token_urlsafe(32))
 
 
+IndianMobile = Annotated[str, StringConstraints(pattern=r"^(?:\+91)?[6-9][0-9]{9}$")]
+
+
+def canonical_phone(phone):
+    return "+91" + phone.removeprefix("+91")
+
+
+class DuplicateMobile(ValueError):
+    pass
+
+
+class SharedMobile(ValueError):
+    pass
+
+
 class Account(BaseModel):
     model_config = ConfigDict(extra="forbid")
     full_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=100)]
-    worker_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{2,31}$")
-    phone: str = Field(pattern=r"^(?:\+91)?[6-9][0-9]{9}$")
+    phone: IndianMobile
     village: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=100)]
     password: str = Field(min_length=12, max_length=128)
     confirm_password: str = Field(max_length=128)
@@ -57,9 +73,20 @@ class Accounts:
                     bucket TEXT PRIMARY KEY, attempts INTEGER NOT NULL, expires INTEGER NOT NULL
                 );
             """)
+            db.execute("BEGIN IMMEDIATE")
+            if "phone_tag" not in {column[1] for column in db.execute("PRAGMA table_info(workers)")}:
+                db.execute("ALTER TABLE workers ADD COLUMN phone_tag TEXT")
+                profiles = db.execute("SELECT id, profile FROM workers").fetchall()
+                for worker, encrypted in profiles:
+                    profile = json.loads(register.cipher.decrypt(encrypted))
+                    db.execute("UPDATE workers SET phone_tag=? WHERE id=?", (self.phone_tag(profile["phone"]), worker))
+            db.execute("CREATE INDEX IF NOT EXISTS workers_phone_tag ON workers(phone_tag)")
             first = db.execute("SELECT profile FROM workers LIMIT 1").fetchone()
             if first:
                 register.cipher.decrypt(first[0])
+
+    def phone_tag(self, phone):
+        return hmac.new(self.register.phone_lookup_key, canonical_phone(phone).encode(), "sha256").hexdigest()
 
     def profile(self, row):
         profile = json.loads(self.register.cipher.decrypt(row["profile"]))
@@ -71,18 +98,21 @@ class Accounts:
         if account.password != account.confirm_password:
             raise ValueError("Passwords must match.")
         profile = account.model_dump(include={"full_name", "phone", "village"})
-        profile["phone"] = "+91" + profile["phone"].removeprefix("+91")
+        profile["phone"] = canonical_phone(profile["phone"])
+        tag = self.phone_tag(profile["phone"])
         hashed = PASSWORDS.hash(account.password)
         with self.register.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             if bootstrap and db.execute("SELECT 1 FROM workers WHERE role='admin'").fetchone():
                 raise ValueError("An administrator already exists.")
-            try:
-                db.execute("INSERT INTO workers(worker_id, profile, password_hash, role, status) VALUES (?, ?, ?, ?, ?)",
-                           (account.worker_id.upper(), self.register.encode(profile), hashed,
-                            "admin" if bootstrap else "worker", "active" if bootstrap else "pending"))
-            except sqlite3.IntegrityError:
-                raise ValueError("That worker ID is already registered.") from None
+            if db.execute("SELECT 1 FROM workers WHERE phone_tag=?", (tag,)).fetchone():
+                raise DuplicateMobile("This mobile number is already registered.")
+            worker_id = f"{'ADMIN' if bootstrap else 'ASHA'}-{uuid4().hex.upper()}"
+            db.execute("""
+                INSERT INTO workers(worker_id, profile, password_hash, role, status, phone_tag)
+                VALUES (?, ?, ?, ?, 'active', ?)
+            """, (worker_id, self.register.encode(profile), hashed, "admin" if bootstrap else "worker", tag))
+        return worker_id
 
     def limited(self, *buckets):
         now = int(time.time())
@@ -100,10 +130,14 @@ class Accounts:
                                "ON CONFLICT(bucket) DO UPDATE SET attempts=attempts+1", (key, now + 900))
         return blocked
 
-    def login(self, worker_id, password):
+    def login(self, phone, password):
+        tag = self.phone_tag(phone)
         with self.register.connection() as db:
             db.row_factory = sqlite3.Row
-            row = db.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
+            matches = db.execute("SELECT * FROM workers WHERE phone_tag=? LIMIT 2", (tag,)).fetchall()
+        if len(matches) > 1:
+            raise SharedMobile("This mobile number is linked to multiple accounts. Contact your administrator.")
+        row = matches[0] if matches else None
         try:
             PASSWORDS.verify(row["password_hash"] if row else DUMMY_HASH, password)
         except (VerificationError, InvalidHashError):
@@ -116,8 +150,9 @@ class Accounts:
             db.execute("DELETE FROM auth_sessions WHERE expires <= ?", (now,))
             inserted = db.execute("""
                 INSERT INTO auth_sessions
-                SELECT ?, id, ? FROM workers WHERE id=? AND status='active' AND password_hash=?
-            """, (digest(token), now + SESSION_SECONDS, row["id"], row["password_hash"])).rowcount
+                SELECT ?, id, ? FROM workers WHERE id=? AND status='active' AND password_hash=? AND phone_tag=?
+                AND (SELECT COUNT(*) FROM workers WHERE phone_tag=?)=1
+            """, (digest(token), now + SESSION_SECONDS, row["id"], row["password_hash"], tag, tag)).rowcount
         return ({**self.profile(row), "expires_at": now + SESSION_SECONDS}, token) if inserted else (None, None)
 
     def session(self, token):
@@ -136,9 +171,13 @@ class Accounts:
             with self.register.connection() as db:
                 db.execute("DELETE FROM auth_sessions WHERE digest=?", (digest(token),))
 
-    def request_reset(self, worker_id):
+    def request_reset(self, phone):
+        tag = self.phone_tag(phone)
         with self.register.connection() as db:
-            db.execute("UPDATE workers SET reset_requested=1 WHERE worker_id=? AND status='active'", (worker_id,))
+            db.execute("""
+                UPDATE workers SET reset_requested=1 WHERE phone_tag=? AND status='active'
+                AND (SELECT COUNT(*) FROM workers WHERE phone_tag=?)=1
+            """, (tag, tag))
 
     def issue_reset(self, worker):
         token = secrets.token_urlsafe(32)
@@ -173,7 +212,7 @@ class Accounts:
             db.execute("DELETE FROM auth_sessions WHERE worker=?", (worker,))
             return bool(updated)
 
-    def recover_admin(self, worker_id, password):
+    def recover_admin(self, worker_id, password, phone=None):
         if not 12 <= len(password) <= 128 or not password.strip():
             raise ValueError("Enter a password of 12 to 128 characters.")
         hashed = PASSWORDS.hash(password)
@@ -185,6 +224,9 @@ class Accounts:
             """, (hashed, worker_id.upper())).fetchone()
             if row is None:
                 raise ValueError("No active administrator matched that ID.")
+            if phone is not None:
+                profile, old_tag = db.execute("SELECT profile, phone_tag FROM workers WHERE id=?", row).fetchone()
+                self.update_phone(db, row[0], json.loads(self.register.cipher.decrypt(profile)), old_tag, phone)
             db.execute("DELETE FROM auth_sessions WHERE worker=?", row)
             db.execute("DELETE FROM password_resets WHERE worker=?", row)
 
@@ -194,7 +236,19 @@ class Accounts:
             return [{**self.profile(row), "reset_requested": bool(row["reset_requested"])}
                     for row in db.execute("SELECT * FROM workers ORDER BY worker_id")]
 
-    def manage_worker(self, worker, status, village):
+    def update_phone(self, db, worker, profile, old_tag, phone):
+        tag = self.phone_tag(phone)
+        if tag == old_tag:
+            return
+        if db.execute("SELECT 1 FROM workers WHERE phone_tag=? AND id != ?", (tag, worker)).fetchone():
+            raise DuplicateMobile("This mobile number is already registered.")
+        profile["phone"] = canonical_phone(phone)
+        db.execute("UPDATE workers SET profile=?, phone_tag=?, reset_requested=0 WHERE id=?",
+                   (self.register.encode(profile), tag, worker))
+        db.execute("DELETE FROM auth_sessions WHERE worker=?", (worker,))
+        db.execute("DELETE FROM password_resets WHERE worker=?", (worker,))
+
+    def manage_worker(self, worker, status, village, phone=None):
         with self.register.connection() as db:
             db.row_factory = sqlite3.Row
             db.execute("BEGIN IMMEDIATE")
@@ -203,6 +257,8 @@ class Accounts:
                 return False
             profile = json.loads(self.register.cipher.decrypt(row["profile"]))
             profile["village"] = village
+            if phone is not None:
+                self.update_phone(db, worker, profile, row["phone_tag"], phone)
             db.execute("UPDATE workers SET status=?, profile=? WHERE id=?", (status, self.register.encode(profile), worker))
             if status != "active":
                 db.execute("DELETE FROM auth_sessions WHERE worker=?", (worker,))

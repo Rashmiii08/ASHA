@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 import sqlite3
@@ -37,6 +38,7 @@ class Register:
     def __init__(self, path: Path, key: bytes):
         self.path = path
         self.cipher = Fernet(key)
+        self.phone_lookup_key = hmac.digest(key, b"asha-phone-lookup-v1", "sha256")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
