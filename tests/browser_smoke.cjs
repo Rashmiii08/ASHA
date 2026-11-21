@@ -31,7 +31,11 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
  await page.getByRole('button',{name:'Send transcript'}).click();
  await page.locator('#details').getByText('36.9').waitFor();
  assert.equal(await page.getByRole('alert').count(),0);
- await page.getByRole('button',{name:'Confirm and save'}).click();
+ await page.getByRole('button',{name:'Stop session'}).click();
+ await page.locator('#transcript').getByText('No, temperature is 36.9.').waitFor();
+ await page.locator('#details').getByText('36.9').waitFor();
+ assert.deepEqual(await page.evaluate(()=>fetch('/api/visits').then(r=>r.json())), []);
+ await page.getByRole('button',{name:'Confirm & Save'}).click();
  await page.locator('#draft-label').getByText('Saved').waitFor();
  await page.getByRole('link',{name:'Visit history'}).click();
  await page.locator('#records').getByText('DEMO-4821').waitFor();
@@ -82,7 +86,7 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
  await capture.routeWebSocket('**/ws', ws => {
    ws.onMessage(raw => {
      const message = JSON.parse(raw);
-     if (message.type === 'hello') ws.send(JSON.stringify({type:'ready', session:'synthetic', mode:'real'}));
+     if (message.type === 'hello') ws.send(JSON.stringify({type:'ready', session:'synthetic', mode:'real', resumed:!!message.session}));
      if (message.type === 'audio') {
        const bytes = Buffer.from(message.data, 'base64');
        assert.equal(bytes.length, 1024);
@@ -133,8 +137,8 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
  await capturePage.locator('#transcript').getByText('Synthetic microphone test').waitFor();
  await capturePage.locator('#voice-transcript-delivery').getByText('Nonempty final text displayed').waitFor();
  assert.ok(!(await capturePage.locator('#voice-diagnostics').innerText()).includes('Synthetic microphone test'));
- await capturePage.getByRole('button',{name:'Start voice visit'}).click();
- await capturePage.locator('#transcript').getByText('Your words will appear here.').waitFor();
+ await capturePage.getByRole('button',{name:'Resume voice visit'}).click();
+ await capturePage.locator('#transcript').getByText('Synthetic microphone test').waitFor();
  await capture.close();
  console.log('Browser smoke passed: keyboard entry, mobile width, Hindi, danger, correction, offline draft, reconnect, confirm, history, follow-up, simulated permission denial, synthetic microphone PCM over WebSocket.');
  } finally { await browser.close(); }

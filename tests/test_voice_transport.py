@@ -180,17 +180,20 @@ def test_fastapi_prisma_audio_transcript_and_diagnostics(tmp_path, monkeypatch):
     class PrismaSocket:
         def __init__(self):
             self.events = asyncio.Queue()
+            self.silence_frames = 0
 
         async def send(self, message):
-            if isinstance(message, bytes):
-                assert message == pcm
+            assert isinstance(message, bytes)
+            if message == pcm:
                 await self.events.put({"type": "speech_start"})
                 await self.events.put({"type": "transcript", "text": partial, "is_final": False})
                 await self.events.put({"type": "error", "message": "private upstream response"})
             else:
-                assert json.loads(message) == {"type": "commit"}
-                await self.events.put({"type": "processing"})
-                await self.events.put({"type": "transcript", "text": final, "is_final": True})
+                assert message == bytes(1024)
+                self.silence_frames += 1
+                if self.silence_frames == 32:
+                    await self.events.put({"type": "processing"})
+                    await self.events.put({"type": "transcript", "text": final, "is_final": True})
 
         def __aiter__(self):
             return self
@@ -253,3 +256,35 @@ def test_fastapi_prisma_audio_transcript_and_diagnostics(tmp_path, monkeypatch):
             assert status["final_sequence"] == status["displayed_final_sequence"] == 1
             assert final not in json.dumps(status)
             assert not client.get("/api/visits").json()
+
+
+def test_live_stop_drains_final_and_saves_only_after_explicit_confirmation(tmp_path, monkeypatch):
+    class DrainProvider(ProviderDouble):
+        async def transcripts(self):
+            await self.input.get()
+            yield "Beneficiary ID DEMO-54, newborn, weight 2.8", True
+            await asyncio.Future()
+
+        async def finish_utterance(self):
+            await self.input.put(b"drain")
+
+    monkeypatch.setattr(live, "load_voice", DrainProvider)
+    monkeypatch.setenv("APP_MODE", "real")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "drain.db"))
+    monkeypatch.setenv("DATA_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    with TestClient(live.create_live_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            socket.send_json({"type": "hello"})
+            assert [socket.receive_json()["type"] for _ in range(4)] == ["ready", "update", "assistant", "audio"]
+            socket.send_json({"type": "pause_capture"})
+            assert socket.receive_json()["type"] == "capture_paused"
+            assert socket.receive_json()["final"]
+            assert socket.receive_json()["state"] == "PROCESSING"
+            draft = socket.receive_json()
+            assert draft["form"]["weight_kg"] == 2.8
+            assert socket.receive_json()["type"] == "assistant"
+            assert not client.get("/api/visits").json()
+            socket.send_json({"type": "confirm_visit", "revision": draft["revision"]})
+            assert socket.receive_json()["state"] == "SAVED"
+        assert [record["beneficiary_id"] for record in client.get("/api/visits").json()] == ["DEMO-54"]

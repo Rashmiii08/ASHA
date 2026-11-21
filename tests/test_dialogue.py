@@ -42,3 +42,43 @@ def test_structured_extraction():
 def test_hindi_code_mixing():
     patch = deterministic("लाभार्थी आईडी DEMO-83, नवजात, वजन 2.8, तापमान 37.6").patch
     assert (patch.beneficiary_id, patch.visit_type, patch.weight_kg) == ("DEMO-83", "newborn", 2.8)
+
+
+def test_reported_condition_clarification_does_not_save():
+    saved = []
+
+    async def store(dialogue):
+        saved.append(dialogue.condition_details())
+
+    async def exercise():
+        dialogue = Dialogue("en")
+        await dialogue.process("Beneficiary ID DEMO-42. Other visit.", None, store)
+        report = "I have sugar."
+        reply = await dialogue.process(report, None, store)
+        assert "healthcare professional previously diagnosed" in reply
+        assert dialogue.condition_details() == [{"term": "Diabetes", "source": "patient_reported"}]
+        reply = await dialogue.process("Yes.", None, store)
+        assert "patient-reported previous diagnosis" in reply
+        assert "other health concerns" in reply
+        assert dialogue.notes[-2:] == [report, "Yes."]
+        assert not saved
+        await dialogue.confirm(store)
+        assert saved == [[{"term": "Diabetes", "source": "patient_reported_previous_diagnosis"}]]
+
+    asyncio.run(exercise())
+
+
+def test_scopes_maternal_temperature_to_mother():
+    async def exercise():
+        dialogue = Dialogue("en")
+        await dialogue.process(
+            "Beneficiary ID DEMO-67, newborn, mother temperature 38 and baby temperature 36.8.",
+            None, None,
+        )
+        assert dialogue.visit.temperature_c == 36.8
+        assert not dialogue.danger
+        await dialogue.process("Mother temperature is 38.", None, None)
+        assert dialogue.visit.temperature_c == 36.8
+        assert not dialogue.danger
+
+    asyncio.run(exercise())

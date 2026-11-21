@@ -83,3 +83,25 @@ def test_real_mode_never_uses_demo(tmp_path, monkeypatch):
         with client.websocket_connect("/ws") as ws:
             ws.send_json({"type": "hello"})
             assert ws.receive_json()["fatal"]
+
+
+def test_pause_preserves_draft_and_explicit_confirmation_is_idempotent(client):
+    with client.websocket_connect("/ws") as ws:
+        token, _ = start(ws)
+        edit = turn(ws, "Beneficiary ID DEMO-42, other visit.")
+        ws.send_json({"type": "pause_capture"})
+        assert ws.receive_json()["type"] == "capture_paused"
+        assert client.get("/api/visits").json() == []
+
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "hello", "session": token, "review_only": True})
+        assert ws.receive_json()["resumed"]
+        restored = ws.receive_json()
+        assert restored == edit
+        ws.send_json({"type": "confirm_visit", "revision": restored["revision"] - 1})
+        assert ws.receive_json()["type"] == "error"
+        assert client.get("/api/visits").json() == []
+        for _ in range(2):
+            ws.send_json({"type": "confirm_visit", "revision": restored["revision"]})
+            assert ws.receive_json()["state"] == "SAVED"
+    assert len(client.get("/api/visits").json()) == 1

@@ -10,6 +10,7 @@ const fields = {
 };
 const language = () => $("language").value;
 let route, records = [], config, online = false;
+let reviewing = false, settling = false, saving = false, turnBusy = false, settleTimer, draftRevision;
 let active = false, starting = false, socket, token, retry, attempts = 0, ready = false;
 let microphoneFrames = 0, nonzeroMicrophoneFrames = 0, droppedAudioFrames = 0;
 let finalDisplayed = false, displayedFinalSequence = 0, serverFinalSequence = 0;
@@ -51,16 +52,17 @@ function setPhase(value) {
   phase = value;
   $("phase").textContent = value;
   $("connection-status").textContent = `Voice connection · ${value}`;
-  $("stop-voice").disabled = !active && !starting;
-  $("start-voice").disabled = active || starting || !online || !!config?.voice_error;
+  $("stop-voice").disabled = reviewing || (!active && !starting);
+  $("start-voice").disabled = (active && !reviewing) || settling || saving || starting || !online || !!config?.voice_error;
+  $("start-voice").setAttribute("aria-label", reviewing ? "Resume voice visit" : "Start voice visit");
   $("start-voice").classList.toggle("active", value === "Listening" && config?.mode === "real");
   $("interrupt").disabled = !ready;
   $("finish-utterance").hidden = config?.mode !== "real";
   $("voice-diagnostics").hidden = config?.mode !== "real";
-  $("finish-utterance").disabled = !ready;
-  $("demo-send").disabled = !ready || value === "Processing";
-  $("demo-confirm").hidden = config?.mode !== "demo" || draftState !== "CONFIRMING";
-  $("save-visit").disabled = !ready || value === "Processing";
+  $("finish-utterance").disabled = !ready || reviewing;
+  $("demo-send").disabled = !ready || reviewing || value === "Processing";
+  $("visit-confirm").hidden = draftState !== "CONFIRMING" || (config?.mode === "real" && !reviewing);
+  $("save-visit").disabled = !ready || settling || saving || turnBusy;
 }
 
 function renderDetails() {
@@ -70,6 +72,13 @@ function renderDetails() {
     row.append(node("dt", label), node("dd", Array.isArray(val) ? val.join(", ") || "None" : val ?? "—"));
     return row;
   }));
+  if (draft.reported_conditions?.length) {
+    const row = node("div");
+    const values = draft.reported_conditions.map(({term, source}) =>
+      `${term} (${source === "patient_reported_previous_diagnosis" ? "patient-reported previous diagnosis" : "patient-reported"})`);
+    row.append(node("dt", "Reported health concerns"), node("dd", values.join(", ")));
+    $("details").append(row);
+  }
   $("danger").hidden = !flagged;
   $("danger").textContent = language() === "hi"
     ? "खतरे का संकेत मिला है। कृपया मरीज़ को तुरंत प्राथमिक स्वास्थ्य केंद्र भेजें।"
@@ -268,7 +277,7 @@ function renderVoiceDiagnostics() {
     ? `${serverAudioChunks ?? "—"} server chunks · ${prisma.frames} sent · ${prisma.nonzero_frames} with signal · peak ${prisma.peak_dbfs ?? "—"} dBFS`
     : `Server chunks received · ${serverAudioChunks ?? "—"}`;
   $("voice-prisma-events").textContent = prisma
-    ? `${prisma.speech_starts} started · ${prisma.processing} processing · ${prisma.partials} partial · ${prisma.finals} final · ${prisma.empty} empty · ${prisma.errors} errors · ${prisma.other} other · ${prisma.commits} commits`
+    ? `${prisma.speech_starts} started · ${prisma.processing} processing · ${prisma.partials} partial · ${prisma.finals} final · ${prisma.empty} empty · ${prisma.errors} errors · ${prisma.other} other · ${prisma.commits} finish requests`
     : "—";
 }
 
@@ -295,7 +304,7 @@ function receive(message) {
       serverAudioChunks = prismaDiagnostics = undefined;
       if (config?.mode === "real") transmit({type: "heartbeat"});
       renderVoiceDiagnostics();
-      setPhase("Listening");
+      setPhase(reviewing ? "Review draft" : "Listening");
       break;
     case "heartbeat":
       attempts = 0;
@@ -308,12 +317,24 @@ function receive(message) {
       draft = message.form;
       flagged = message.danger_flag;
       draftState = message.state;
-      setPhase(message.state === "CONFIRMING" ? "Review and confirm" : message.state === "SAVED" ? "Saved" : "Listening");
+      draftRevision = message.revision;
+      turnBusy = false;
+      saving = false;
+      setPhase(message.state === "SAVED" ? "Saved" : settling ? "Waiting for speech processing" : reviewing ? "Review draft" :
+        message.state === "CONFIRMING" ? "Review and confirm" : "Listening");
       renderDetails();
       rememberDraft();
-      if (draftState === "SAVED") refreshRecords().catch(() => notice("Visit saved. Reconnect to refresh history."));
+      if (draftState === "SAVED") {
+        stop(true);
+        setPhase("Saved");
+        notice("Visit saved. You can find it in Visit history.");
+        refreshRecords().catch(() => notice("Visit saved. Reconnect to refresh history."));
+      }
+      break;
+    case "capture_paused":
       break;
     case "phase":
+      turnBusy = true;
       setPhase("Processing");
       break;
     case "assistant":
@@ -359,6 +380,8 @@ function receive(message) {
       clearPlayback();
       break;
     case "error":
+      saving = false;
+      setPhase(phase);
       notice(message.message);
       if (!ready) {
         voiceConnection = message.message;
@@ -392,7 +415,7 @@ function connect() {
   lastReply = performance.now();
   // Allow both the upstream upgrade and the Prisma ready acknowledgement.
   heartbeat = setTimeout(() => current.close(), 25000);
-  current.onopen = () => current.send(JSON.stringify({type: "hello", language: language(), session: token || null}));
+  current.onopen = () => current.send(JSON.stringify({type: "hello", language: language(), session: token || null, review_only: reviewing}));
   current.onmessage = event => {
     if (socket !== current) return;
     lastReply = performance.now();
@@ -454,7 +477,7 @@ function capture({pcm, rms}) {
 }
 
 async function start() {
-  if (active || starting || !online || config?.voice_error) return;
+  if ((active && !reviewing) || starting || settling || saving || !online || config?.voice_error) return;
   notice("");
   setPrismaIssue();
   microphoneFrames = nonzeroMicrophoneFrames = droppedAudioFrames = 0;
@@ -465,6 +488,7 @@ async function start() {
   const thisRun = ++voiceRun;
   setPhase("Starting");
   let openedStream, openedContext;
+  let startedCapture = false;
   try {
     if (config.mode === "real") {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.AudioContext) {
@@ -498,7 +522,16 @@ async function start() {
       $("microphone-status").textContent = "Microphone · active";
     }
     if (thisRun !== voiceRun) return;
+    if (reviewing) {
+      reviewing = false;
+      const previous = socket;
+      socket = null;
+      previous?.close();
+      clearTimeout(retry);
+      retry = null;
+    }
     active = true;
+    startedCapture = true;
     connect();
   } catch (error) {
     if (thisRun !== voiceRun) return;
@@ -508,7 +541,7 @@ async function start() {
       "Could not start microphone capture. Check browser and device permissions.");
     setPhase("Ready");
   } finally {
-    if (!active || thisRun !== voiceRun) {
+    if (!startedCapture || thisRun !== voiceRun) {
       openedStream?.getTracks().forEach(track => track.stop());
       if (openedContext?.state !== "closed") void openedContext?.close();
     }
@@ -519,16 +552,7 @@ async function start() {
   }
 }
 
-function stop(preserveDraft = false) {
-  voiceRun += 1;
-  active = ready = starting = false;
-  clearTimeout(retry);
-  clearTimeout(heartbeat);
-  retry = null;
-  attempts = generation = 0;
-  const previous = socket;
-  socket = null;
-  previous?.close();
+function releaseMicrophone() {
   clearPlayback();
   clearTimeout(captureTimer);
   microphone?.disconnect();
@@ -540,6 +564,56 @@ function stop(preserveDraft = false) {
   stream?.getTracks().forEach(track => track.stop());
   if (context?.state !== "closed") void context?.close();
   context = stream = microphone = worklet = mutedOutput = null;
+}
+
+function pauseForReview() {
+  if (!active) {
+    stop(true);
+    return;
+  }
+  voiceRun += 1;
+  reviewing = true;
+  releaseMicrophone();
+  $("microphone-status").textContent = "Microphone · stopped";
+  if (!ready) {
+    turnBusy = false;
+    setPhase("Review draft");
+    notice("Microphone stopped while disconnected. The visible draft is preserved, but some speech may not have finished processing. Reconnect to save.");
+    return;
+  }
+  transmit({type: "pause_capture"});
+  if (config?.mode === "real" || turnBusy) {
+    settling = true;
+    setPhase("Waiting for speech processing");
+    notice("Microphone stopped. Waiting briefly for any final speech result.");
+    settleTimer = setTimeout(() => {
+      settling = false;
+      if (turnBusy) {
+        setPhase("Processing");
+        notice("Speech processing hasn’t finished. The current draft is preserved. Wait for the visit details to update before saving.");
+      } else {
+        setPhase("Review draft");
+        notice("Microphone stopped. Review the available details. If any speech is missing, resume the visit and repeat it before saving.");
+      }
+    }, 5000);
+  } else {
+    setPhase("Review draft");
+    notice("Microphone stopped. Review the draft before saving.");
+  }
+}
+
+function stop(preserveDraft = false) {
+  voiceRun += 1;
+  active = ready = starting = reviewing = settling = saving = turnBusy = false;
+  clearTimeout(settleTimer);
+  clearTimeout(retry);
+  clearTimeout(heartbeat);
+  retry = null;
+  attempts = generation = 0;
+  const previous = socket;
+  socket = null;
+  previous?.close();
+  releaseMicrophone();
   token = null;
   clearPartialTranscript();
   if (!preserveDraft) voiceConnection = "Idle";
@@ -578,7 +652,7 @@ $("today").textContent = new Intl.DateTimeFormat(undefined, {weekday: "long", mo
 $("welcome-start").onclick = () => { changeLanguage($("welcome-language").value); location.hash = "dashboard"; };
 $("language").onchange = event => changeLanguage(event.target.value);
 $("start-voice").onclick = start;
-$("stop-voice").onclick = () => stop();
+$("stop-voice").onclick = pauseForReview;
 $("interrupt").onclick = interrupt;
 $("finish-utterance").onclick = () => transmit({type: "finish_utterance"});
 $("search").oninput = renderRecords;
@@ -589,7 +663,12 @@ $("sample").onclick = () => {
     : "Beneficiary ID DEMO-4821, newborn, weight 2.8 kg, temperature 37.6. Vaccines due BCG, OPV-0. Next visit 2026-11-25.";
   $("demo-text").focus();
 };
-$("save-visit").onclick = () => sendDemo(language() === "hi" ? "हाँ सेव करें" : "Yes, save it.");
+$("save-visit").onclick = () => {
+  if (!ready || draftState !== "CONFIRMING" || saving || settling || turnBusy) return;
+  saving = true;
+  setPhase(phase);
+  transmit({type: "confirm_visit", revision: draftRevision});
+};
 $("delete-data").onclick = async () => {
   if (!confirm("Delete every confirmed synthetic visit from this register and discard this browser’s current draft?")) return;
   try {

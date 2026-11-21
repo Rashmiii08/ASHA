@@ -42,7 +42,7 @@ Refresh the app, grant microphone access, and say a short **synthetic** visit no
 
 1. **Prisma stream ready** means the upgrade and negotiated audio configuration succeeded. A rejected upgrade logs the HTTP status. Check the Codex hostname allowlist and Gnani account access for authentication or authorization errors.
 2. **Browser microphone PCM received** means the browser sent audio through ASHA's WebSocket. If this is absent, check the browser's microphone permission, selected input, and waveform. A successful capture status indicates frames are being produced, even if the input is silent.
-3. **Prisma PCM frames sent** means ASHA wrote audio frames to the upstream WebSocket. Compare the windowed RMS and peak dBFS values while speaking. A window consisting of silent frames indicates digital silence. If the signal reaches Prisma but no speech event appears, tap **Finish speaking** and check for `Prisma utterance commit sent`. This asks Prisma to close an open utterance and does not save the visit.
+3. **Prisma PCM frames sent** means ASHA wrote audio frames to the upstream WebSocket. Compare the windowed RMS and peak dBFS values while speaking. A window consisting of silent frames indicates digital silence. If the signal reaches Prisma but no speech event appears, tap **Finish speaking** and check for `Prisma utterance ended with paced silence frames`. This asks Prisma to close an open utterance and does not save the visit.
 4. **Prisma event: speech_start**, **processing**, and **transcript** identify the provider stages. An empty final gets its own log entry.
 
 Application diagnostics record counts, event types, and HTTP status codes. Leave WebSocket wire logging disabled, since it can include credentials and payloads.

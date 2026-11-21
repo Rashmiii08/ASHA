@@ -10,13 +10,30 @@ PHRASES = {
 }
 
 
+OTHER_SUBJECT = re.compile(r"\b(?:i|mother|mom|mum|father|parent|caregiver|sibling|brother|sister)\b|माँ|माता|पिता")
+INFANT_SUBJECT = re.compile(r"\b(?:baby|infant|newborn)\b|शिशु|नवजात")
+NON_AFFIRMATIVE = re.compile(r"\b(?:no|denies|denied|without|history of|if|screen for)\b|दौरे नहीं")
+CLAUSE_BREAK = r"[;,!?।\n]|(?<!\d)\.|\.(?!\d)|\b(?:but|however|and (?=(?:the )?(?:baby|infant|newborn|mother|mom|mum|father|parent|caregiver|i)\b))\b"
+
+
+def newborn_clauses(transcript):
+    for clause in re.split(CLAUSE_BREAK, transcript.lower()):
+        if not OTHER_SUBJECT.search(clause):
+            yield clause
+            continue
+        infant = INFANT_SUBJECT.search(clause)
+        if (infant and not OTHER_SUBJECT.search(clause[infant.start():])
+                and not NON_AFFIRMATIVE.search(clause[:infant.start()])):
+            yield clause[infant.start():]
+
+
 def assess(visit: Visit, transcript: str, candidates: list[str]) -> set[str]:
     if visit.visit_type != "newborn":
         return set()
 
     symptoms = set()
-    for clause in re.split(r"[.;,!?।\n]|\b(?:but|however)\b", transcript.lower()):
-        if re.search(r"\b(?:no|denies|without|history of|if|screen for)\b|दौरे नहीं", clause):
+    for clause in newborn_clauses(transcript):
+        if NON_AFFIRMATIVE.search(clause):
             continue
         for sign, pattern in PHRASES.items():
             if re.search(pattern, clause):

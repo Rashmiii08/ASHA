@@ -17,3 +17,15 @@ from backend.schemas import Visit
 )
 def test_scope_and_thresholds(category, temperature, text, expected):
     assert assess(Visit(visit_type=category, temperature_c=temperature), text, ["convulsions"]) == expected
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("Mother has seizures. Baby is feeding well.", set()),
+    ("Mother denies baby has seizures.", set()),
+    ("We discussed what to do if the baby cannot feed.", set()),
+    ("Mother reports that the baby cannot feed.", {"unable_to_feed"}),
+    ("Baby cannot feed and I have sugar.", {"unable_to_feed"}),
+    ("Baby has seizures and mother temperature is normal.", {"convulsions"}),
+])
+def test_newborn_symptom_attribution(text, expected):
+    assert assess(Visit(visit_type="newborn"), text, ["convulsions"]) == expected

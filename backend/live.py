@@ -36,6 +36,7 @@ class Hello(BaseModel):
     type: str
     language: Language = "en"
     session: UUID | None = None
+    review_only: bool = False
 
 
 @dataclass
@@ -46,6 +47,7 @@ class Session:
     last_final: str | None = None
     final_sequence: int = 0
     displayed_final_sequence: int = 0
+    revision: int = 0
 
 
 def same_origin(scope):
@@ -130,6 +132,10 @@ def create_live_app():
         playback_lock = asyncio.Lock()
         browser_gone = False
         audio_chunks = audio_bytes = 0
+        capture_paused = False
+        processing_turn = False
+        final_delivery_pending = False
+        turn_lock = asyncio.Lock()
 
         def browser_connected():
             return (
@@ -166,7 +172,8 @@ def create_live_app():
         async def update(latency=None):
             await send({
                 "type": "update", "state": dialogue.state,
-                "form": dialogue.visit.model_dump(mode="json"),
+                "form": {**dialogue.visit.model_dump(mode="json"), "reported_conditions": dialogue.condition_details()},
+                "revision": session.revision,
                 "danger_flag": bool(dialogue.danger), "latency_ms": latency,
             })
 
@@ -215,20 +222,26 @@ def create_live_app():
             extract = app.state.gemini.extract if app.state.gemini else None
             try:
                 async with asyncio.timeout(20):
-                    reply = await dialogue.process(text, extract, store)
+                    reply = await dialogue.process(text, extract, store, allow_save=not capture_paused)
             except Exception as exc:
                 LOG.warning("Visit processing failed (%s)", type(exc).__name__)
+                session.revision += 1
                 await error("Could not process the visit. Repeat the last instruction.")
                 await update()
                 return
+            session.revision += 1
             await update()
-            await play(reply, round((time.monotonic() - started) * 1000))
+            if capture_paused:
+                generation_at_reply = generation
+                await send({"type": "assistant", "text": reply, "generation": generation_at_reply})
+            else:
+                await play(reply, round((time.monotonic() - started) * 1000))
 
         async def store(draft):
             await run_in_threadpool(app.state.register.insert, draft)
 
         async def receive(stream=None):
-            nonlocal browser_gone, audio_chunks, audio_bytes
+            nonlocal browser_gone, audio_chunks, audio_bytes, capture_paused
             while True:
                 try:
                     raw = await socket.receive_text()
@@ -247,6 +260,33 @@ def create_live_app():
                     async with playback_lock:
                         await stop_playback()
                         await send({"type": "interrupted", "generation": generation})
+                elif kind == "pause_capture":
+                    capture_paused = True
+                    async with playback_lock:
+                        await stop_playback()
+                    finish = getattr(stream, "finish_utterance", None)
+                    if finish is not None:
+                        await finish()
+                    await send({"type": "capture_paused"})
+                elif kind == "confirm_visit":
+                    if dialogue.state == "SAVED":
+                        await update()
+                    elif mode == "real" and not capture_paused:
+                        await error("Stop microphone recording before confirming the visit.")
+                    elif processing_turn or final_delivery_pending or not pending.empty() or message.get("revision") != session.revision:
+                        await error("The draft is still updating. Review the latest details and confirm again.")
+                    elif dialogue.state != "CONFIRMING" or dialogue.pending_condition:
+                        await error("Complete the required details and answer any pending clarification before saving.")
+                    else:
+                        try:
+                            async with turn_lock:
+                                await dialogue.confirm(store)
+                        except Exception as exc:
+                            LOG.warning("Visit save failed (%s)", type(exc).__name__)
+                            await error("Could not save the visit. The draft is still available. Please try again.")
+                        else:
+                            session.revision += 1
+                            await update()
                 elif kind == "finish_utterance" and stream:
                     finish = getattr(stream, "finish_utterance", None)
                     if finish is None:
@@ -275,13 +315,13 @@ def create_live_app():
                     except (KeyError, ValueError, TypeError, binascii.Error):
                         await error("Expected a bounded base64 PCM16 audio chunk.")
                         continue
-                    if stream:
+                    if stream and not capture_paused:
                         audio_chunks += 1
                         audio_bytes += len(pcm)
                         if audio_chunks == 1 or audio_chunks % 100 == 0:
                             LOG.info("Browser microphone PCM received: chunks=%d bytes=%d", audio_chunks, audio_bytes)
                         await stream.send_pcm(pcm)
-                elif kind == "demo_transcript" and mode == "demo":
+                elif kind == "demo_transcript" and mode == "demo" and not capture_paused:
                     if pending.full():
                         await error("Wait for the current turn to finish.")
                     else:
@@ -293,6 +333,7 @@ def create_live_app():
             await send({"type": "prisma_notice", "code": code})
 
         async def transcripts(stream):
+            nonlocal final_delivery_pending
             events = stream.transcripts(prisma_notice) if isinstance(stream, PrismaStream) else stream.transcripts()
             async for text, final in events:
                 if not isinstance(text, str) or not text.strip():
@@ -304,7 +345,11 @@ def create_live_app():
                     session.last_final = payload["text"]
                     session.final_sequence += 1
                     payload["sequence"] = session.final_sequence
-                await send(payload)
+                final_delivery_pending = final
+                try:
+                    await send(payload)
+                finally:
+                    final_delivery_pending = False
                 if len(text) > 3000:
                     if final:
                         await error("The transcript is too long to process. Please speak a shorter note.")
@@ -318,8 +363,15 @@ def create_live_app():
             raise RuntimeError("Speech stream ended")
 
         async def turns():
+            nonlocal processing_turn
             while True:
-                await handle_text(await pending.get(), announced=mode == "real")
+                text = await pending.get()
+                processing_turn = True
+                try:
+                    async with turn_lock:
+                        await handle_text(text, announced=mode == "real")
+                finally:
+                    processing_turn = False
 
         async def cleanup():
             # Finish joining the child tasks even if the ASGI session is cancelled.
@@ -383,7 +435,8 @@ def create_live_app():
             sessions[token] = session
             session.connected = True
             dialogue = session.dialogue
-            if mode == "demo":
+            capture_paused = hello.review_only and existing is not None
+            if mode == "demo" or capture_paused:
                 await announce()
                 if not existing:
                     await play(dialogue.phrases["disclose"])

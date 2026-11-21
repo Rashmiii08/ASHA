@@ -55,6 +55,7 @@ class Register:
         record = {
             **dialogue.visit.model_dump(mode="json"),
             "transcript": dialogue.notes,
+            "reported_conditions": dialogue.condition_details(),
             "danger_flag": bool(dialogue.danger),
             "danger_signs": sorted(dialogue.danger),
             "confirmed": True,
