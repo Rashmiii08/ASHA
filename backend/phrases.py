@@ -1,0 +1,25 @@
+PHRASES = {
+    "en": {
+        "disclose": "I am an AI assistant, not a human. Tell me about your visit.",
+        "danger": "Danger sign detected. Please refer to the Primary Health Centre immediately.",
+        "missing": "Please say the beneficiary ID and visit type if you have them.",
+        "unclear": "Please repeat the field name and its value.",
+        "confirm": "Say yes, save it, or tell me what to correct.",
+        "saved": "Visit saved.",
+        "fields": ["Beneficiary ID", "Visit type", "Weight in kilograms", "Vaccinations due",
+                   "Next visit", "Temperature in Celsius", "Systolic pressure", "Diastolic pressure"],
+        "types": {},
+    },
+    "hi": {
+        "disclose": "मैं एक एआई सहायक हूँ, इंसान नहीं। कृपया अपनी विज़िट के बारे में बताइए।",
+        "danger": "खतरे का संकेत मिला है। कृपया मरीज़ को तुरंत प्राथमिक स्वास्थ्य केंद्र भेजें।",
+        "missing": "यदि उपलब्ध हो, तो लाभार्थी आईडी और विज़िट का प्रकार बताइए।",
+        "unclear": "कृपया फ़ील्ड का नाम और सही जानकारी दोहराएँ।",
+        "confirm": "कहें हाँ, सेव करें, या बताइए क्या सुधारना है।",
+        "saved": "विज़िट सेव हो गई।",
+        "fields": ["लाभार्थी आईडी", "विज़िट का प्रकार", "वज़न किलोग्राम में", "बाकी टीके",
+                   "अगली विज़िट", "तापमान सेल्सियस में", "ऊपरी रक्तचाप", "निचला रक्तचाप"],
+        "types": {"antenatal": "गर्भावस्था", "postnatal": "प्रसव के बाद", "newborn": "नवजात",
+                  "immunisation": "टीकाकरण", "other": "अन्य"},
+    },
+}
