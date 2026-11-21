@@ -1,6 +1,7 @@
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+from threading import Event
 
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
@@ -110,3 +111,53 @@ def test_provider_reconnect_preserves_draft_and_waits_for_stream(tmp_path, monke
             assert socket.receive_json()["form"]["beneficiary_id"] == "DEMO-24"
 
     assert provider.openings == 3
+
+
+def test_browser_disconnected_state_cleans_provider_without_writes(tmp_path, monkeypatch, caplog):
+    from starlette import websockets as starlette_ws
+
+    disconnected = getattr(starlette_ws, "WebSocketDisconnected", starlette_ws.WebSocketDisconnect)
+    provider = ProviderDouble()
+    monkeypatch.setattr(live, "load_voice", lambda: provider)
+    monkeypatch.setenv("APP_MODE", "real")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "disconnect.db"))
+    monkeypatch.setenv("DATA_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    receive_text = live.WebSocket.receive_text
+    send = live.WebSocket.send
+    writes_after_disconnect = []
+    disconnect_seen = Event()
+
+    async def receive(self):
+        raw = await receive_text(self)
+        if raw == "simulate-disconnected-state":
+            raise disconnected()
+        return raw
+
+    async def watched_send(self, message):
+        if getattr(self, "_test_disconnected", False):
+            writes_after_disconnect.append(message["type"])
+        await send(self, message)
+
+    async def marked_receive(self):
+        try:
+            return await receive(self)
+        except disconnected:
+            self._test_disconnected = True
+            disconnect_seen.set()
+            raise
+
+    monkeypatch.setattr(live.WebSocket, "receive_text", marked_receive)
+    monkeypatch.setattr(live.WebSocket, "send", watched_send)
+    with TestClient(live.create_live_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            socket.send_json({"type": "hello"})
+            assert socket.receive_json()["type"] == "ready"
+            assert socket.receive_json()["type"] == "update"
+            assert socket.receive_json()["type"] == "assistant"
+            assert socket.receive_json()["type"] == "audio"
+            socket.send_text("simulate-disconnected-state")
+            assert disconnect_seen.wait(timeout=2)
+    assert provider.closed and provider.interrupted
+    assert not writes_after_disconnect
+    assert "Voice session failed" not in caplog.text

@@ -64,6 +64,38 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
  await deniedPage.goto(baseURL + '/#live');
  await deniedPage.getByRole('button',{name:'Start voice visit'}).click();
  await deniedPage.getByText(/Microphone permission was denied/).waitFor();
- console.log('Browser smoke passed: keyboard entry, mobile width, Hindi, danger, correction, offline draft, reconnect, confirm, history, follow-up, simulated permission denial.');
+ await denied.close();
+ const capture = await browser.newContext({serviceWorkers: 'block'});
+ await capture.route('**/api/status', route=>route.fulfill({json:{mode:'real',voice_ready:true,voice_error:null}}));
+ await capture.addInitScript(() => {
+   Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {value: async () => {
+     const audioContext = new AudioContext();
+     await audioContext.resume();
+     const signal = audioContext.createOscillator();
+     const output = audioContext.createMediaStreamDestination();
+     signal.connect(output);
+     signal.start();
+     return output.stream;
+   }});
+ });
+ await capture.routeWebSocket('**/ws', ws => {
+   ws.onMessage(raw => {
+     const message = JSON.parse(raw);
+     if (message.type === 'hello') ws.send(JSON.stringify({type:'ready', session:'synthetic', mode:'real'}));
+     if (message.type === 'audio') {
+       const bytes = Buffer.from(message.data, 'base64');
+       assert.equal(bytes.length, 3200);
+       assert.ok(bytes.some(byte => byte !== 0));
+       ws.send(JSON.stringify({type:'transcript', text:'Synthetic microphone test', final:true}));
+     }
+   });
+ });
+ const capturePage = await capture.newPage();
+ await capturePage.goto(baseURL + '/#live');
+ await capturePage.getByRole('button',{name:'Start voice visit'}).click();
+ await capturePage.locator('#transcript').getByText('Synthetic microphone test').waitFor({timeout:10000});
+ await capturePage.getByRole('button',{name:'Stop session'}).click();
+ await capture.close();
+ console.log('Browser smoke passed: keyboard entry, mobile width, Hindi, danger, correction, offline draft, reconnect, confirm, history, follow-up, simulated permission denial, synthetic microphone PCM over WebSocket.');
  } finally { await browser.close(); }
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -3,11 +3,16 @@
 import asyncio
 import base64
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import WebSocketException
+from websockets.exceptions import InvalidStatus, WebSocketException
+
+LOG = logging.getLogger(__name__)
+# WebSocket debug logging can include credential headers and voice frames.
+WIRE_LOG = logging.Logger("gnani.websocket", logging.CRITICAL + 1)
 
 PRISMA_URL = "wss://api.vachana.ai/stt/v3/stream"
 TIMBRE_URL = "wss://api.vachana.ai/api/v1/tts"
@@ -38,15 +43,23 @@ class GnaniTransport:
 
     @asynccontextmanager
     async def _open(self, service: str, url: str, header: str, settings=None) -> AsyncIterator[ClientConnection]:
+        LOG.info("Gnani %s WebSocket connecting", service)
         try:
             async with connect(
                 url,
                 additional_headers={header: self._api_key, **(settings or {})},
                 open_timeout=10,
                 close_timeout=2,
+                logger=WIRE_LOG,
             ) as socket:
+                LOG.info("Gnani %s WebSocket upgrade accepted", service)
                 yield socket
-        except (OSError, WebSocketException):
+        except InvalidStatus as exc:
+            status = exc.response.status_code
+            LOG.warning("Gnani %s WebSocket upgrade rejected: HTTP %d", service, status)
+            raise GnaniConnectionError(f"Gnani {service} WebSocket upgrade was rejected.") from None
+        except (OSError, WebSocketException) as exc:
+            LOG.warning("Gnani %s WebSocket failed: %s", service, type(exc).__name__)
             raise GnaniConnectionError(f"Gnani {service} WebSocket connection failed.") from None
 
 
@@ -73,6 +86,7 @@ class PrismaStream:
         self._socket = socket
         self._buffer = bytearray()
         self._next_frame_at = 0.0
+        self._frames_sent = 0
 
     async def send_pcm(self, pcm: bytes) -> None:
         if len(pcm) % 2:
@@ -88,19 +102,27 @@ class PrismaStream:
                 await asyncio.sleep(delay)
             await self._socket.send(bytes(self._buffer[:frame_size]))
             del self._buffer[:frame_size]
+            self._frames_sent += 1
+            if self._frames_sent == 1 or self._frames_sent % 300 == 0:
+                LOG.info("Prisma PCM frames sent: frames=%d bytes=%d", self._frames_sent, self._frames_sent * frame_size)
             self._next_frame_at = max(self._next_frame_at + 0.032, loop.time())
 
     async def transcripts(self) -> AsyncIterator[tuple[str, bool]]:
         async for raw in self._socket:
             message = _json_message(raw, "Prisma")
-            if message.get("type") == "error":
+            kind = message.get("type")
+            if kind in ("speech_start", "processing", "transcript", "error"):
+                LOG.info("Prisma event: %s", kind)
+            if kind == "error":
                 raise GnaniProtocolError("Gnani Prisma reported a transcription error.")
-            if message.get("type") == "transcript":
+            if kind == "transcript":
                 payload = message.get("text")
                 if not isinstance(payload, str) or message.get("is_final", True) is not True:
                     raise GnaniProtocolError("Gnani Prisma sent an invalid final transcript.")
                 if payload.strip():
                     yield payload, True
+                else:
+                    LOG.info("Prisma final transcript was empty")
 
 
 class GnaniVoice(GnaniTransport):
@@ -114,6 +136,7 @@ class GnaniVoice(GnaniTransport):
             config = message.get("config")
             if not isinstance(config, dict) or config.get("sample_rate") != 16000 or config.get("chunk_size") != 512:
                 raise GnaniProtocolError("Gnani Prisma negotiated an unexpected audio format.")
+            LOG.info("Prisma stream ready: sample_rate=16000 frame_samples=512")
             yield PrismaStream(socket)
 
     async def speak(self, text: str, language: str) -> AsyncIterator[bytes]:

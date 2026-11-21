@@ -10,11 +10,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from anyio import CancelScope
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette import websockets as starlette_ws
 from starlette.concurrency import run_in_threadpool
+from starlette.websockets import WebSocketState
 
 from .db import Register, delete_visits, demo_key
 from .dialogue import Dialogue
@@ -25,6 +28,7 @@ from .schemas import Language
 ROOT = Path(__file__).resolve().parents[1]
 LOG = logging.getLogger(__name__)
 MAX_SESSION_IDLE = 1800
+BROWSER_DISCONNECTS = (WebSocketDisconnect, getattr(starlette_ws, "WebSocketDisconnected", WebSocketDisconnect))
 
 
 class Hello(BaseModel):
@@ -120,15 +124,31 @@ def create_live_app():
         generation = 0
         send_lock = asyncio.Lock()
         playback_lock = asyncio.Lock()
+        browser_gone = False
+        audio_chunks = audio_bytes = 0
+
+        def browser_connected():
+            return (
+                not browser_gone
+                and socket.client_state is WebSocketState.CONNECTED
+                and socket.application_state is WebSocketState.CONNECTED
+            )
 
         async def send(payload):
+            nonlocal browser_gone
             async with send_lock:
-                await socket.send_json(payload)
+                if not browser_connected():
+                    raise WebSocketDisconnect()
+                try:
+                    await socket.send_json(payload)
+                except BROWSER_DISCONNECTS:
+                    browser_gone = True
+                    raise
 
         async def error(message, fatal=False):
             try:
                 await send({"type": "error", "message": message, "fatal": fatal})
-            except WebSocketDisconnect:
+            except BROWSER_DISCONNECTS:
                 pass
 
         async def stop_playback():
@@ -166,8 +186,8 @@ def create_live_app():
                             if close is not None:
                                 await close()
                     await send({"type": "audio_end", "generation": current_generation})
-                except (WebSocketDisconnect, asyncio.CancelledError):
-                    raise
+                except BROWSER_DISCONNECTS:
+                    return
                 except Exception as exc:
                     LOG.warning("Speech synthesis failed (%s)", type(exc).__name__)
                     await error("Gnani speech playback failed.")
@@ -203,7 +223,13 @@ def create_live_app():
             await run_in_threadpool(app.state.register.insert, draft)
 
         async def receive(stream=None):
-            async for raw in socket.iter_text():
+            nonlocal browser_gone, audio_chunks, audio_bytes
+            while True:
+                try:
+                    raw = await socket.receive_text()
+                except BROWSER_DISCONNECTS:
+                    browser_gone = True
+                    raise
                 try:
                     if len(raw) > 25_000:
                         raise ValueError
@@ -227,6 +253,10 @@ def create_live_app():
                         await error("Expected a bounded base64 PCM16 audio chunk.")
                         continue
                     if stream:
+                        audio_chunks += 1
+                        audio_bytes += len(pcm)
+                        if audio_chunks == 1 or audio_chunks % 100 == 0:
+                            LOG.info("Browser microphone PCM received: chunks=%d bytes=%d", audio_chunks, audio_bytes)
                         await stream.send_pcm(pcm)
                 elif kind == "demo_transcript" and mode == "demo":
                     if pending.full():
@@ -251,19 +281,27 @@ def create_live_app():
             while True:
                 await handle_text(await pending.get())
 
+        async def cleanup():
+            # Finish joining the child tasks even if the ASGI session is cancelled.
+            with CancelScope(shield=True):
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                tasks.clear()
+                await stop_playback()
+
         async def run(stream=None):
             tasks.update((asyncio.create_task(receive(stream)), asyncio.create_task(turns())))
             if stream:
                 tasks.add(asyncio.create_task(transcripts(stream)))
             try:
                 done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                if not browser_connected():
+                    return
                 for task in done:
                     task.result()
             finally:
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                tasks.clear()
+                await cleanup()
 
         async def announce():
             nonlocal announced
@@ -313,27 +351,28 @@ def create_live_app():
                     if not existing:
                         await play(dialogue.phrases["disclose"])
                     await run(stream)
-        except WebSocketDisconnect:
-            pass
+        except BROWSER_DISCONNECTS:
+            browser_gone = True
         except (ValueError, asyncio.TimeoutError):
             await error("The session could not be started.", fatal=True)
         except Exception as exc:
-            LOG.warning("Voice session failed (%s)", type(exc).__name__)
-            await error("The voice connection ended. Reconnecting may restore your draft.")
+            if browser_connected():
+                LOG.warning("Voice session failed (%s)", type(exc).__name__)
+                await error("The voice connection ended. Reconnecting may restore your draft.")
         finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await stop_playback()
+            await cleanup()
             if session:
                 session.connected = False
                 session.touched = time.monotonic()
                 if existing is None and not announced:
                     del sessions[token]
-            try:
-                await socket.close()
-            except (RuntimeError, WebSocketDisconnect):
-                pass
+            if mode == "real" and announced:
+                LOG.info("Voice session ended: browser_pcm_chunks=%d browser_pcm_bytes=%d", audio_chunks, audio_bytes)
+            if browser_connected():
+                try:
+                    await socket.close()
+                except BROWSER_DISCONNECTS:
+                    pass
 
     app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True), name="frontend")
     return app

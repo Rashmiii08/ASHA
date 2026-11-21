@@ -27,3 +27,20 @@ Timbre uses the documented v3.0 voice Shivani and requests raw 16 kHz mono PCM16
 Set `GEMINI_API_KEY` and `GEMINI_MODEL` together to enable structured Gemini extraction in real mode. Confirmations remain local. The cloud environment must permit the supported Gemini API hostname.
 
 Generate a Fernet key privately with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Paste it into `DATA_KEY` and keep a secure copy. Use the same key for the lifetime of the database. Demo mode creates an ignored durable key file if `DATA_KEY` is empty. Use a separate `DATABASE_PATH` when testing with a different key.
+
+## If the browser shows Listening without a transcript
+
+Start Uvicorn with the app loggers enabled at INFO. Uvicorn's access log alone does not include the app's audio diagnostics.
+
+```bash
+python -c "import logging, uvicorn; logging.basicConfig(level=logging.INFO); uvicorn.run('backend.live:create_live_app', factory=True, host='127.0.0.1', port=8765, ws_max_size=32768)"
+```
+
+Refresh the app, grant microphone access, and say a short **synthetic** visit note. Pause for Prisma's speech detector. Check these stages in order:
+
+1. **Prisma stream ready** means the upgrade and negotiated audio configuration succeeded. A rejected upgrade logs the HTTP status. Check the Codex hostname allowlist and Gnani account access for authentication or authorization errors.
+2. **Browser microphone PCM received** means the browser sent audio through ASHA's WebSocket. If this is absent, check the browser's microphone permission, selected input, and waveform. A successful capture status indicates frames are being produced, even if the input is silent.
+3. **Prisma PCM frames sent** means ASHA wrote audio frames to the upstream WebSocket. If these are present with no speech events, check the actual input level, background noise and pause between utterances.
+4. **Prisma event: speech_start**, **processing**, and **transcript** identify the provider stages. An empty final gets its own log entry.
+
+Application diagnostics record counts, event types, and HTTP status codes. Leave WebSocket wire logging disabled, since it can include credentials and payloads.

@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 from contextlib import asynccontextmanager
 
 import pytest
@@ -20,7 +21,7 @@ def test_uses_confirmed_url_and_header(monkeypatch, service, url, header):
     closed = []
 
     @asynccontextmanager
-    async def connect(target, *, additional_headers, open_timeout, close_timeout):
+    async def connect(target, *, additional_headers, open_timeout, close_timeout, logger):
         assert target == url
         assert additional_headers[header] == "synthetic-test-key"
         if service == "prisma":
@@ -115,7 +116,8 @@ class MockSocket:
         self.sent.append(data)
 
 
-def test_prisma_acknowledgement_binary_frames_and_final_transcript(monkeypatch):
+def test_prisma_acknowledgement_binary_frames_and_final_transcript(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=provider.__name__)
     socket = MockSocket([
         {"type": "connected", "config": {"sample_rate": 16000, "chunk_size": 512}},
         {"type": "speech_start", "utterance_id": "test"},
@@ -138,6 +140,11 @@ def test_prisma_acknowledgement_binary_frames_and_final_transcript(monkeypatch):
             assert [event async for event in stream.transcripts()] == [("Weight is 2.8 kg", True)]
 
     asyncio.run(exercise())
+    assert "Prisma stream ready" in caplog.text
+    assert "Prisma PCM frames sent: frames=1 bytes=1024" in caplog.text
+    assert "Prisma event: transcript" in caplog.text
+    assert "Weight is 2.8 kg" not in caplog.text
+    assert "synthetic-key" not in caplog.text
     assert len(socket.sent) == 4
     assert all(isinstance(frame, bytes) and len(frame) == 1024 for frame in socket.sent)
     assert b"".join(socket.sent) == b"\x12\x34" * 1600 + b"\x56\x78" * 448

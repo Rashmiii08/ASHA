@@ -12,7 +12,7 @@ const language = () => $("language").value;
 let route, records = [], config, online = false;
 let active = false, starting = false, socket, token, retry, attempts = 0, ready = false;
 let phase = "Ready", draft = {}, flagged = false, draftState, heartbeat, lastReply;
-let context, stream, worklet, nextTime = 0, generation = -1, sources = new Set();
+let context, stream, microphone, worklet, mutedOutput, captureTimer, nextTime = 0, generation = -1, sources = new Set();
 let voiceRun = 0, lastSpeech = 0, processing = null, sustained = 0;
 let waveHistory = Array(32).fill(0);
 
@@ -319,6 +319,11 @@ function draw(level = 0) {
 }
 
 function capture({pcm, rms}) {
+  if (captureTimer) {
+    clearTimeout(captureTimer);
+    captureTimer = null;
+    $("microphone-status").textContent = "Microphone · capturing audio";
+  }
   draw(rms);
   const now = performance.now();
   if (rms >= .035) {
@@ -352,10 +357,19 @@ async function start() {
       });
       await openedContext.audioWorklet.addModule("/audio-worklet.js");
       if (thisRun !== voiceRun) return;
-      const mic = openedContext.createMediaStreamSource(openedStream);
-      worklet = new AudioWorkletNode(openedContext, "field-microphone", {numberOfOutputs: 0});
-      worklet.port.onmessage = event => capture(event.data);
-      mic.connect(worklet);
+      microphone = openedContext.createMediaStreamSource(openedStream);
+      worklet = new AudioWorkletNode(openedContext, "field-microphone");
+      mutedOutput = openedContext.createGain();
+      mutedOutput.gain.value = 0;
+      worklet.port.onmessage = event => {
+        if (thisRun === voiceRun) capture(event.data);
+      };
+      // Keep the processor in the rendered graph without playing microphone audio.
+      microphone.connect(worklet).connect(mutedOutput).connect(openedContext.destination);
+      captureTimer = setTimeout(() => {
+        $("microphone-status").textContent = "Microphone · no audio frames";
+        notice("The browser opened the microphone but received no audio frames. Check the input device and restart the visit.");
+      }, 4000);
       context = openedContext;
       stream = openedStream;
       $("microphone-status").textContent = "Microphone · active";
@@ -393,10 +407,16 @@ function stop(preserveDraft = false) {
   socket = null;
   previous?.close();
   clearPlayback();
-  worklet?.disconnect();
+  clearTimeout(captureTimer);
+  microphone?.disconnect();
+  if (worklet) {
+    worklet.port.onmessage = null;
+    worklet.disconnect();
+  }
+  mutedOutput?.disconnect();
   stream?.getTracks().forEach(track => track.stop());
   if (context?.state !== "closed") void context?.close();
-  context = stream = worklet = null;
+  context = stream = microphone = worklet = mutedOutput = null;
   token = null;
   lastSpeech = sustained = 0;
   if (!preserveDraft) {
