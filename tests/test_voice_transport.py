@@ -66,3 +66,47 @@ def test_stream_and_interrupt_with_provider_double(tmp_path, monkeypatch):
             update = socket.receive_json()
             assert update["state"] == "CONFIRMING" and update["form"]["weight_kg"] == 2.8
     assert provider.closed
+
+
+def test_provider_reconnect_preserves_draft_and_waits_for_stream(tmp_path, monkeypatch):
+    class ReconnectingProvider(ProviderDouble):
+        openings = 0
+
+        @asynccontextmanager
+        async def listen(self, language):
+            self.openings += 1
+            if self.openings == 2:
+                raise ConnectionError("mock connection failure")
+            async with super().listen(language) as stream:
+                yield stream
+
+        async def speak(self, text, language):
+            yield bytes(3200)
+
+    provider = ReconnectingProvider()
+    monkeypatch.setattr(live, "load_voice", lambda: provider)
+    monkeypatch.setenv("APP_MODE", "real")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "reconnect.db"))
+    monkeypatch.setenv("DATA_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+
+    with TestClient(live.create_live_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            socket.send_json({"type": "hello"})
+            token = socket.receive_json()["session"]
+            socket.send_json({"type": "audio", "data": base64.b64encode(bytes(3200)).decode()})
+            while (message := socket.receive_json())["type"] != "update" or message["state"] != "CONFIRMING":
+                pass
+
+        with client.websocket_connect("/ws") as socket:
+            socket.send_json({"type": "hello", "session": token})
+            failure = socket.receive_json()
+            assert failure["type"] == "error" and not failure["fatal"]
+
+        with client.websocket_connect("/ws") as socket:
+            socket.send_json({"type": "hello", "session": token})
+            ready = socket.receive_json()
+            assert ready["type"] == "ready" and ready["resumed"] and ready["session"] == token
+            assert socket.receive_json()["form"]["beneficiary_id"] == "DEMO-24"
+
+    assert provider.openings == 3

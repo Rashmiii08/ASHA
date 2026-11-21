@@ -114,10 +114,12 @@ def create_live_app():
             return
         await socket.accept()
         session = None
+        announced = False
         tasks = set()
         playback = None
         generation = 0
         send_lock = asyncio.Lock()
+        playback_lock = asyncio.Lock()
 
         async def send(payload):
             async with send_lock:
@@ -146,14 +148,8 @@ def create_live_app():
 
         async def play(text, processing_ms=None):
             nonlocal playback
-            await stop_playback()
-            current_generation = generation
-            await send({"type": "assistant", "text": text, "generation": current_generation,
-                        "processing_ms": processing_ms})
-            if app.state.voice is None:
-                return
 
-            async def speak():
+            async def speak(current_generation):
                 first = True
                 try:
                     async with asyncio.timeout(45):
@@ -170,7 +166,13 @@ def create_live_app():
                     LOG.warning("Speech synthesis failed (%s)", type(exc).__name__)
                     await error("Gnani speech playback failed.")
 
-            playback = asyncio.create_task(speak())
+            async with playback_lock:
+                await stop_playback()
+                current_generation = generation
+                await send({"type": "assistant", "text": text, "generation": current_generation,
+                            "processing_ms": processing_ms})
+                if app.state.voice is not None:
+                    playback = asyncio.create_task(speak(current_generation))
 
         async def handle_text(text):
             if not isinstance(text, str) or not 1 <= len(text.strip()) <= 3000:
@@ -205,8 +207,9 @@ def create_live_app():
                     await error("Invalid WebSocket message.")
                     continue
                 if kind == "interrupt":
-                    await stop_playback()
-                    await send({"type": "interrupted", "generation": generation})
+                    async with playback_lock:
+                        await stop_playback()
+                        await send({"type": "interrupted", "generation": generation})
                 elif kind == "heartbeat":
                     await send({"type": "heartbeat"})
                 elif kind == "audio":
@@ -256,6 +259,12 @@ def create_live_app():
                 await asyncio.gather(*tasks, return_exceptions=True)
                 tasks.clear()
 
+        async def announce():
+            nonlocal announced
+            await send({"type": "ready", "session": token, "mode": mode, "resumed": existing is not None})
+            announced = True
+            await update()
+
         pending = asyncio.Queue(maxsize=1)
         try:
             raw_hello = await asyncio.wait_for(socket.receive_text(), timeout=10)
@@ -287,14 +296,14 @@ def create_live_app():
             sessions[token] = session
             session.connected = True
             dialogue = session.dialogue
-            await send({"type": "ready", "session": token, "mode": mode, "resumed": existing is not None})
-            await update()
             if mode == "demo":
+                await announce()
                 if not existing:
                     await play(dialogue.phrases["disclose"])
                 await run()
             else:
                 async with app.state.voice.listen(dialogue.language) as stream:
+                    await announce()
                     if not existing:
                         await play(dialogue.phrases["disclose"])
                     await run(stream)
@@ -313,6 +322,8 @@ def create_live_app():
             if session:
                 session.connected = False
                 session.touched = time.monotonic()
+                if existing is None and not announced:
+                    del sessions[token]
             try:
                 await socket.close()
             except (RuntimeError, WebSocketDisconnect):

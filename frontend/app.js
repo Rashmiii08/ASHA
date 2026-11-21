@@ -223,10 +223,12 @@ function receive(message) {
   switch (message.type) {
     case "ready":
       clearTimeout(heartbeat);
-      attempts = 0;
       token = message.session;
       ready = true;
       setPhase("Listening");
+      break;
+    case "heartbeat":
+      attempts = 0;
       break;
     case "update":
       draft = message.form;

@@ -2,9 +2,16 @@
 
 Set values in the ignored local `.env` file. Use environment settings for centrally managed values. Keep keys out of chat, code, shell history, screenshots, frontend files, and Git. Use synthetic transcripts when sending data to external providers.
 
+## Configure keys in Codex
+
+1. Open the ASHA cloud environment settings. For documentation access, add `docs.gnani.ai` to the allowed Internet hostnames. Apply the change to the running session if offered. The documentation hostname is separate from the provider's WebSocket hosts.
+2. When the verified transport is available, add `GNANI_API_KEY` as a secret in environment settings. If the platform asks for allowed destinations, use only the verified Prisma and Timbre WebSocket hostnames. If your environment has no secret control, open `.env` in the workspace editor and enter the value there. Git ignores this file.
+3. In the workspace's ignored `.env`, set a persistent `DATA_KEY` and the provider module path. Set `APP_MODE=real` only once the provider is installed and configured. Leave demo mode on until then.
+4. Restart the app. Use a synthetic visit to test transcription, read-back, interruption and recovery.
+
 ## Gnani Prisma v3.0 and Timbre v3.0
 
-The cloud proxy denied the attempted Gnani documentation pages. The checkout did not contain provider code, and no Gnani credentials were configured. The provider transport requires the official WebSocket URLs and handshake examples for the account, authentication method, Prisma audio framing and endpointing events, supported language codes, Timbre response format and end markers, and provider rate-limit guidance. Obtain these from the Gnani hackathon portal or account support.
+The cloud proxy denied access to the [official Gnani documentation URL](https://docs.gnani.ai/api/introduction/introduction) before reaching the service. The checkout did not contain provider code, and no Gnani credentials were configured. The provider transport requires the official WebSocket URLs and handshake examples for the account, authentication method, Prisma audio framing and endpointing events, supported language codes, Timbre response format and end markers, and provider rate-limit guidance. Obtain these from the Gnani hackathon portal or account support.
 
 Once verified, install a trusted Python module implementing `backend.gnani.adapter.Voice` and its `create_voice(api_key)` factory. Configure its import path in `GNANI_PROTOCOL_MODULE`, its API key in `GNANI_API_KEY`, then set `APP_MODE=real`. The plugin must translate both WebSocket protocols to the app's 16 kHz signed little-endian mono PCM16 format and manage provider stream shutdown. The app does not contain that plugin today. A key alone cannot enable live voice.
 
