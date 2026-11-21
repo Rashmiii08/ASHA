@@ -33,8 +33,8 @@ class ProviderDouble:
 
     async def transcripts(self):
         assert await self.input.get() == bytes(3200)
-        yield "Beneficiary ID DEMO-24", False
-        yield "Beneficiary ID DEMO-24, newborn, weight 2.8", True
+        yield "Beneficiary ID 0024", False
+        yield "Beneficiary ID 0024, newborn, weight 2.8", True
         await asyncio.Future()
 
     async def speak(self, text, language):
@@ -115,7 +115,7 @@ def test_provider_reconnect_preserves_draft_and_waits_for_stream(tmp_path, monke
             socket.send_json({"type": "hello", "session": token})
             ready = socket.receive_json()
             assert ready["type"] == "ready" and ready["resumed"] and ready["session"] == token
-            assert socket.receive_json()["form"]["beneficiary_id"] == "DEMO-24"
+            assert socket.receive_json()["form"]["beneficiary_id"] == "0024"
 
     assert provider.openings == 3
 
@@ -174,7 +174,7 @@ def test_fastapi_prisma_audio_transcript_and_diagnostics(tmp_path, monkeypatch):
     from backend.gnani.provider import PrismaStream
 
     partial = "Unconfirmed synthetic draft"
-    final = "Beneficiary ID DEMO-24, newborn, weight 2.8"
+    final = "Beneficiary ID 0024, newborn, weight 2.8"
     pcm = b"\x00\x20" * 512
 
     class PrismaSocket:
@@ -262,7 +262,7 @@ def test_live_stop_drains_final_and_saves_only_after_explicit_confirmation(tmp_p
     class DrainProvider(ProviderDouble):
         async def transcripts(self):
             await self.input.get()
-            yield "Beneficiary ID DEMO-54, newborn, weight 2.8", True
+            yield "Beneficiary ID 0054, newborn, weight 2.8", True
             await asyncio.Future()
 
         async def finish_utterance(self):
@@ -287,12 +287,12 @@ def test_live_stop_drains_final_and_saves_only_after_explicit_confirmation(tmp_p
             assert not client.get("/api/visits").json()
             socket.send_json({"type": "confirm_visit", "revision": draft["revision"]})
             assert socket.receive_json()["state"] == "SAVED"
-        assert [record["beneficiary_id"] for record in client.get("/api/visits").json()] == ["DEMO-54"]
+        assert [record["beneficiary_id"] for record in client.get("/api/visits").json()] == ["0054"]
 
 
 def test_live_diagnosis_reply_reaches_voice_and_stop_requires_explicit_save(tmp_path, monkeypatch):
     texts = [
-        "Beneficiary ID DEMO-61. General health visit. The patient has sugar and high BP.",
+        "Beneficiary ID 0061. General health visit. The patient has sugar and high BP.",
         "Yes, they have.",
         "No.",
     ]

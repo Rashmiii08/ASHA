@@ -7,17 +7,17 @@ import json
 from backend.dialogue import Dialogue
 
 FIXTURES = [
-    ("en", "Beneficiary ID DEMO-7, newborn, weight 2.7, temperature 37.6.",
-     {"beneficiary_id": "DEMO-7", "visit_type": "newborn", "weight_kg": 2.7, "temperature_c": 37.6},
+    ("en", "Beneficiary ID 0007, newborn, weight 2.7, temperature 37.6.",
+     {"beneficiary_id": "0007", "visit_type": "newborn", "weight_kg": 2.7, "temperature_c": 37.6},
      {"newborn_high_temperature"}, "No, weight is 2.8", 2.8, "Yes, save it."),
-    ("hi", "लाभार्थी आईडी DEMO-8, नवजात, वजन 2.6, तापमान 35.4।",
-     {"beneficiary_id": "DEMO-8", "visit_type": "newborn", "weight_kg": 2.6, "temperature_c": 35.4},
+    ("hi", "लाभार्थी आईडी 0008, नवजात, वजन 2.6, तापमान 35.4।",
+     {"beneficiary_id": "0008", "visit_type": "newborn", "weight_kg": 2.6, "temperature_c": 35.4},
      {"newborn_low_temperature"}, "वजन 2.7", 2.7, "हाँ सेव करें"),
-    ("en", "Beneficiary ID DEMO-9, antenatal, weight 56.2, blood pressure 120/80.",
-     {"beneficiary_id": "DEMO-9", "visit_type": "antenatal", "weight_kg": 56.2, "bp_systolic": 120, "bp_diastolic": 80},
+    ("en", "Beneficiary ID 0009, antenatal, weight 56.2, blood pressure 120/80.",
+     {"beneficiary_id": "0009", "visit_type": "antenatal", "weight_kg": 56.2, "bp_systolic": 120, "bp_diastolic": 80},
      set(), "Weight is 57.0", 57.0, "Yes, save it."),
-    ("en", "Beneficiary ID DEMO-10, newborn, weight 2.9. Baby cannot feed.",
-     {"beneficiary_id": "DEMO-10", "visit_type": "newborn", "weight_kg": 2.9},
+    ("en", "Beneficiary ID 0010, newborn, weight 2.9. Baby cannot feed.",
+     {"beneficiary_id": "0010", "visit_type": "newborn", "weight_kg": 2.9},
      {"unable_to_feed"}, "Weight is 3.0", 3.0, "Yes, save it."),
 ]
 

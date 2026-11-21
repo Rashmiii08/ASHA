@@ -77,6 +77,34 @@ function setPhase(value) {
   $("apply-edit").disabled = settling || saving || turnBusy;
 }
 
+function vaccinationRow(plan = {}) {
+  const row = node("fieldset");
+  const name = node("input");
+  name.placeholder = "Vaccine name (if known)";
+  name.setAttribute("aria-label", "Vaccine name");
+  name.maxLength = 40;
+  name.value = plan.name ?? "";
+  const status = node("select");
+  status.setAttribute("aria-label", "Vaccination status");
+  for (const value of ["due", "given"]) {
+    const option = node("option", value === "due" ? "Due" : "Given");
+    option.value = value;
+    status.append(option);
+  }
+  status.value = plan.status ?? "due";
+  const due = node("input");
+  due.type = "date";
+  due.setAttribute("aria-label", "Vaccination due date");
+  due.value = plan.due_date ?? "";
+  status.onchange = () => { due.disabled = status.value === "given"; };
+  status.onchange();
+  const remove = node("button", "Remove vaccination", "secondary");
+  remove.type = "button";
+  remove.onclick = () => row.remove();
+  row.append(name, status, due, remove);
+  return row;
+}
+
 function renderDetails() {
   $("details").replaceChildren(...Object.entries(fields).map(([key, label]) => {
     const row = node("div");
@@ -84,24 +112,30 @@ function renderDetails() {
     row.append(node("dt", label), node("dd", Array.isArray(val) ? val.join(", ") || "None" : val ?? "—"));
     return row;
   }));
+  const vaccinations = draft.vaccination_plans ?? [];
+  $("vaccination-plans").replaceChildren(...vaccinations.map(plan => node("li",
+    `${plan.name ?? "Unnamed vaccination"} · ${plan.status}${plan.due_date ? ` · Due ${plan.due_date} · Follow-up reminder ${plan.due_date}` : ""}`)));
+  $("vaccination-heading").parentElement.hidden = !vaccinations.length;
+  $("edit-vaccination-plans").replaceChildren(...vaccinations.map(vaccinationRow));
   const concerns = draft.reported_conditions ?? [];
   $("reported-empty").hidden = concerns.length > 0;
   $("reported-conditions").hidden = concerns.length === 0;
-  $("reported-conditions").replaceChildren(...concerns.map(({term, source}) => node("li",
-    `${term} (${source === "patient_reported_previous_diagnosis" ? "patient-reported previous diagnosis" : "patient-reported"})`)));
+  $("reported-conditions").replaceChildren(...concerns.map(({term, source, subject}) => node("li",
+    `${subject ? `${subject === "mother" ? "Mother" : "Newborn"} · ` : ""}${term} (${source === "patient_reported_previous_diagnosis" ? "patient-reported previous diagnosis" : "patient-reported"})`)));
   $("edit-beneficiary").value = draft.beneficiary_id ?? "";
   $("edit-visit-type").value = draft.visit_type ?? "";
   $("edit-concerns").hidden = concerns.length === 0;
-  $("edit-concern-list").replaceChildren(...concerns.map(({term}) => {
+  $("edit-concern-list").replaceChildren(...concerns.map(({term, subject}) => {
     const label = node("label");
     const input = node("input");
     input.type = "checkbox";
-    input.value = term;
+    input.value = subject ? `${subject}:${term}` : term;
+    if (subject) input.dataset.subject = subject;
     input.checked = true;
-    label.append(input, " ", term);
+    label.append(input, " ", subject ? `${subject}: ${term}` : term);
     const row = node("div");
     row.append(label);
-    if (reviewInfo.pending_diagnoses?.includes(term)) {
+    if (!subject && reviewInfo.pending_diagnoses?.includes(term)) {
       const answer = node("select");
       answer.dataset.diagnosis = term;
       answer.setAttribute("aria-label", `Previous diagnosis for ${term}`);
@@ -148,21 +182,23 @@ function list(target, data, empty, followup = false) {
     const name = node("div");
     name.append(node("strong", item.beneficiary_id), node("small", visitTypeLabel(item.visit_type)));
     const date = node("div");
-    date.append(node("strong", followup ? item.next_visit_date : localDate(new Date(item.created_at))));
+    date.append(node("strong", followup ? item.scheduled.date : localDate(new Date(item.created_at))));
+    if (followup && item.scheduled.kind === "vaccination")
+      date.append(node("small", item.scheduled.name ? `${item.scheduled.name} vaccination` : "Vaccination follow-up"));
     if (item.danger_flag) date.append(node("small", "Referral flagged", "flag"));
     if (!followup && item.next_visit_date) {
       date.append(node("small", item.followup_completed ? "Follow-up complete" : `Follow-up · ${item.next_visit_date}`));
     }
     row.append(name, date);
-    if (followup && item.followup_completed) row.append(node("small", "Completed"));
-    if (followup && !item.followup_completed) {
+    if (followup && item.scheduled.completed) row.append(node("small", "Completed"));
+    if (followup && !item.scheduled.completed) {
       const button = node("button", "Mark complete", "secondary");
       button.setAttribute("aria-label", `Mark follow-up complete for ${item.beneficiary_id}`);
       button.disabled = !online;
       button.onclick = async () => {
         button.disabled = true;
         try {
-          await request(`/api/visits/${item.id}/followup`, {method: "PATCH"});
+          await request(`/api/visits/${item.id}/followup?followup_id=${encodeURIComponent(item.scheduled.id)}`, {method: "PATCH"});
           await refreshRecords();
         } catch {
           notice("Could not update the follow-up. Try again once connected.");
@@ -176,8 +212,8 @@ function list(target, data, empty, followup = false) {
 }
 
 function renderRecords() {
-  const followups = records.filter(r => r.next_visit_date).sort((a, b) =>
-    Number(a.followup_completed) - Number(b.followup_completed) || a.next_visit_date.localeCompare(b.next_visit_date));
+  const followups = records.flatMap(record => (record.followups ?? []).map(scheduled => ({...record, scheduled})))
+    .sort((a, b) => Number(a.scheduled.completed) - Number(b.scheduled.completed) || a.scheduled.date.localeCompare(b.scheduled.date));
   const query = $("search").value.trim().toLowerCase();
   const empty = online ? "No confirmed visits yet." : "Connect to load confirmed visits.";
   list($("recent"), records.slice(0, 4), empty);
@@ -187,7 +223,7 @@ function renderRecords() {
   const stats = {
     "Today's visits": records.filter(r => localDate(new Date(r.created_at)) === localDate()).length,
     "Completed records": records.length,
-    "Pending follow-ups": followups.filter(r => !r.followup_completed).length,
+    "Pending follow-ups": followups.filter(r => !r.scheduled.completed).length,
     "Flagged visits": records.filter(r => r.danger_flag).length,
   };
   $("stats").replaceChildren(...Object.entries(stats).map(([label, value]) => {
@@ -711,8 +747,8 @@ $("search").oninput = renderRecords;
 $("demo-form").onsubmit = event => { event.preventDefault(); sendDemo($("demo-text").value); };
 $("sample").onclick = () => {
   $("demo-text").value = language() === "hi"
-    ? "लाभार्थी आईडी DEMO-4821, नवजात, वजन 2.8, तापमान 37.6, बाकी टीके BCG, OPV-0. अगली विज़िट 2026-11-25."
-    : "Beneficiary ID DEMO-4821, newborn, weight 2.8 kg, temperature 37.6. Vaccines due BCG, OPV-0. Next visit 2026-11-25.";
+    ? "लाभार्थी आईडी 4821, नवजात, वजन 2.8, तापमान 37.6, बाकी टीके BCG, OPV-0. अगली विज़िट in 3 days."
+    : "Beneficiary ID 4821, newborn, weight 2.8 kg, temperature 37.6. Vaccines due BCG, OPV-0. Next visit in 3 days.";
   $("demo-text").focus();
 };
 function submitReview(type) {
@@ -722,7 +758,12 @@ function submitReview(type) {
     $("edit-visit").reportValidity();
     return;
   }
-  const retained = [...$("edit-concern-list").querySelectorAll("input:checked")].map(input => input.value);
+  const selected = [...$("edit-concern-list").querySelectorAll("input:checked")];
+  const retained = selected.filter(input => !input.dataset.subject).map(input => input.value);
+  const vaccinationPlans = [...$("edit-vaccination-plans").children].map(row => {
+    const [name, status, due] = row.querySelectorAll("input, select");
+    return {name: name.value.trim() || null, status: status.value, due_date: due.disabled ? null : due.value || null};
+  });
   const diagnosisAnswers = Object.fromEntries([...$("edit-concern-list").querySelectorAll("select[data-diagnosis]")]
     .filter(select => retained.includes(select.dataset.diagnosis) && select.value)
     .map(select => [select.dataset.diagnosis, select.value === "yes"]));
@@ -730,7 +771,7 @@ function submitReview(type) {
   setPhase(phase);
   transmit({
     type, revision: draftRevision,
-    beneficiary_id: $("edit-beneficiary").value.trim() || null,
+    beneficiary_id: $("edit-beneficiary").value || null,
     visit_type: $("edit-visit-type").value || null,
     ...Object.fromEntries(Object.entries(measurementEditors).map(([field, id]) =>
       [field, $(id).value === "" ? null : Number($(id).value)])),
@@ -738,12 +779,15 @@ function submitReview(type) {
     vaccinations_due: $("edit-vaccinations").value.split(",").map(value => value.trim()).filter(Boolean),
     transcript_correction: $("edit-transcript").value || null,
     retained_conditions: retained,
+    retained_contextual_conditions: selected.filter(input => input.dataset.subject).map(input => input.value),
+    vaccination_plans: vaccinationPlans,
     added_conditions: $("add-concern").value ? [$("add-concern").value] : [],
     diagnosis_answers: diagnosisAnswers,
     exclude_unclear_report: $("exclude-unclear").checked,
   });
 }
 
+$("add-vaccination-plan").onclick = () => $("edit-vaccination-plans").append(vaccinationRow());
 $("edit-visit").onsubmit = event => {
   event.preventDefault();
   submitReview("edit_visit");

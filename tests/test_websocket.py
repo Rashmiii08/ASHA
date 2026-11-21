@@ -47,7 +47,7 @@ def test_full_workflow(client):
         ws.send_json({"type": "audio", "data": base64.b64encode(bytes(3200)).decode()})
         ws.send_json({"type": "interrupt"})
         assert ws.receive_json()["type"] == "interrupted"
-        update = turn(ws, "Beneficiary ID DEMO-42, newborn, temperature 37.6. Next visit 2026-12-01.")
+        update = turn(ws, "Beneficiary ID 0042, newborn, temperature 37.6. Next visit 2099-12-01.")
         assert update["state"] == "CONFIRMING"
         assert update["danger_flag"]
         with client.websocket_connect("/ws") as other:
@@ -55,7 +55,7 @@ def test_full_workflow(client):
             assert fresh["form"]["beneficiary_id"] is None
     with client.websocket_connect("/ws") as ws:
         _, restored = start(ws, token)
-        assert restored["form"]["beneficiary_id"] == "DEMO-42"
+        assert restored["form"]["beneficiary_id"] == "0042"
         assert turn(ws, "No, temperature is 36.9")["danger_flag"] is False
         assert client.get("/api/visits").json() == []
         assert turn(ws, "Yes, save it.")["state"] == "SAVED"
@@ -88,7 +88,7 @@ def test_real_mode_never_uses_demo(tmp_path, monkeypatch):
 def test_pause_preserves_draft_and_explicit_confirmation_is_idempotent(client):
     with client.websocket_connect("/ws") as ws:
         token, _ = start(ws)
-        edit = turn(ws, "Beneficiary ID DEMO-42, other visit.")
+        edit = turn(ws, "Beneficiary ID 0042, other visit.")
         ws.send_json({"type": "pause_capture"})
         assert ws.receive_json()["type"] == "capture_paused"
         assert client.get("/api/visits").json() == []
@@ -124,7 +124,7 @@ def test_general_health_utterance_and_draft_edit(client):
         ws.send_json({"type": "pause_capture"})
         assert ws.receive_json()["type"] == "capture_paused"
         ws.send_json({
-            "type": "edit_visit", "revision": result["revision"], "beneficiary_id": "DEMO-70",
+            "type": "edit_visit", "revision": result["revision"], "beneficiary_id": "0070",
             "visit_type": "general_health", "retained_conditions": ["Diabetes"], "diagnosis_answers": {"Diabetes": False},
         })
         edited = ws.receive_json()
@@ -142,9 +142,9 @@ def test_save_requires_fields_and_explicit_clarification(client):
         ws.send_json({"type": "confirm_visit", "revision": initial["revision"]})
         assert ws.receive_json()["type"] == "update"
         assert ws.receive_json()["message"] == "Enter a beneficiary ID. Select a visit type."
-        update = turn(ws, "Beneficiary ID DEMO-71. General health visit. I have sugar.")
+        update = turn(ws, "Beneficiary ID 0071. General health visit. I have sugar.")
         ws.send_json({
-            "type": "confirm_visit", "revision": update["revision"], "beneficiary_id": "DEMO-71",
+            "type": "confirm_visit", "revision": update["revision"], "beneficiary_id": "0071",
             "visit_type": "general_health", "retained_conditions": ["Diabetes"],
         })
         assert ws.receive_json()["review"]["pending_diagnoses"] == ["Diabetes"]
@@ -167,12 +167,12 @@ def test_save_atomic_edits_database_failure_retry_and_history(client, monkeypatc
         return insert(dialogue)
 
     monkeypatch.setattr(register, "insert", fail_once)
-    original = "Beneficiary ID DEMO-72. General health visit. Weight 60. I have fever."
+    original = "Beneficiary ID 0072. General health visit. Weight 60. I have fever."
     with client.websocket_connect("/ws") as ws:
         start(ws)
         draft = turn(ws, original)
         payload = {
-            "type": "confirm_visit", "revision": draft["revision"], "beneficiary_id": "DEMO-72",
+            "type": "confirm_visit", "revision": draft["revision"], "beneficiary_id": "0072",
             "visit_type": "general_health", "weight_kg": 62.5, "temperature_c": 37.2,
             "bp_systolic": 120, "bp_diastolic": 80, "retained_conditions": ["Fever"],
             "added_conditions": ["Difficulty breathing"], "transcript_correction": "Corrected synthetic note.",
@@ -188,7 +188,7 @@ def test_save_atomic_edits_database_failure_retry_and_history(client, monkeypatc
         ws.send_json(payload)
         assert ws.receive_json()["state"] == "SAVED"
     record, = client.get("/api/visits").json()
-    assert record["beneficiary_id"] == "DEMO-72" and record["bp_systolic"] == 120
+    assert record["beneficiary_id"] == "0072" and record["bp_systolic"] == 120
     assert [condition["term"] for condition in record["reported_conditions"]] == ["Fever", "Difficulty breathing"]
     assert len(seen) == 2 and seen[0] == seen[1]
     assert "transcript_correction" not in record
@@ -197,3 +197,19 @@ def test_save_atomic_edits_database_failure_retry_and_history(client, monkeypatc
     stored = json.loads(register.cipher.decrypt(encrypted))
     assert stored["transcript"] == [original]
     assert stored["transcript_correction"] == "Corrected synthetic note."
+
+
+def test_save_rejects_invalid_manual_id_and_newborn_weight(client):
+    with client.websocket_connect("/ws") as ws:
+        start(ws)
+        draft = turn(ws, "Beneficiary ID 1234, newborn, weight 3.5 kg.")
+        payload = {"type": "confirm_visit", "revision": draft["revision"], "beneficiary_id": "102222",
+                   "visit_type": "newborn", "retained_conditions": [], "weight_kg": 3.5}
+        ws.send_json(payload)
+        assert "exactly four numeric digits" in ws.receive_json()["message"]
+        ws.send_json({**payload, "beneficiary_id": "1234", "weight_kg": 36})
+        assert "unusually high" in ws.receive_json()["message"]
+        assert client.get("/api/visits").json() == []
+        ws.send_json({**payload, "beneficiary_id": "1234"})
+        assert ws.receive_json()["state"] == "SAVED"
+    assert client.get("/api/visits").json()[0]["beneficiary_id"] == "1234"

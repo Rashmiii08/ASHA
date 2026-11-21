@@ -58,3 +58,11 @@ For a single-instance Render service with a persistent disk, mount a disk at a p
 If the service plan cannot attach a disk or the app needs multiple instances, use managed PostgreSQL with an explicit migration that retains Fernet-encrypted visit payloads. The current code uses SQLite and does not connect to PostgreSQL.
 
 [Render persistent disks](https://render.com/docs/disks)
+
+## Deploy the visit validation and scheduling update
+
+Back up the existing encrypted SQLite database before deploying this release. Deploy `main` to the existing Render service with its current `DATA_KEY`, Gnani credentials, startup command, and persistent `DATABASE_PATH`. Do not set a new encryption key for an existing register. The update applies the four-digit ID and newborn weight rules to new writes. Existing records can still be listed and their follow-ups completed. The release does not rewrite or migrate the database on startup.
+
+Spoken relative dates are resolved using India Standard Time. Calendar-month offsets clamp to the last day of a shorter month. **Next week** means seven days later. A month-and-day date without a year uses the current year and needs clarification if it has already passed. Vaccination dates are based only on the worker’s input. An unnamed vaccination date appears as a vaccination follow-up.
+
+After deployment, use a synthetic four-digit beneficiary ID to verify voice capture, a relative next-visit date, a vaccination reminder, explicit **Save Visit**, and completion from **Follow-ups**. Check Visit History after restarting the Render service to verify that its configured storage actually persists.

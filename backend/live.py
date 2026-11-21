@@ -14,7 +14,7 @@ from anyio import CancelScope
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette import websockets as starlette_ws
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketState
@@ -101,10 +101,10 @@ def create_live_app():
         return await run_in_threadpool(app.state.register.list)
 
     @app.patch("/api/visits/{visit_id}/followup")
-    async def complete(visit_id: UUID, request: Request):
+    async def complete(visit_id: UUID, request: Request, followup_id: str = "visit"):
         if not same_origin(request):
             raise HTTPException(403)
-        if not await run_in_threadpool(app.state.register.complete_followup, str(visit_id)):
+        if not await run_in_threadpool(app.state.register.complete_followup, str(visit_id), followup_id):
             raise HTTPException(404, "Follow-up not found")
         return {"completed": True}
 
@@ -290,8 +290,20 @@ def create_live_app():
                         if kind == "edit_visit" or "retained_conditions" in message:
                             try:
                                 dialogue.apply_review(VisitReview.model_validate(message))
-                            except ValueError:
-                                await error("Check the beneficiary ID, visit type, measurements, and clarification answers.")
+                            except ValidationError as exc:
+                                problems = exc.errors(include_input=False)
+                                if any(item["loc"] == ("beneficiary_id",) for item in problems):
+                                    await error("The beneficiary ID must contain exactly four numeric digits.")
+                                elif any("unusually high for a newborn" in item["msg"] for item in problems):
+                                    await error("This weight is unusually high for a newborn. Confirm the weight in kilograms.")
+                                else:
+                                    await error("Check the visit type, measurements, vaccination schedule, and clarification answers.")
+                                continue
+                            except ValueError as exc:
+                                if str(exc) == "Follow-up dates must be today or later.":
+                                    await error("Follow-up dates must be today or later.")
+                                else:
+                                    await error("Check the reported concerns and clarification answers.")
                                 continue
                             session.revision += 1
                         if kind == "edit_visit":

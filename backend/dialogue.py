@@ -1,14 +1,15 @@
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
 from uuid import uuid4
 
 from pydantic import ValidationError
 
 from .danger import OTHER_SUBJECT, assess, newborn_clauses
 from .phrases import PHRASES
-from .schemas import Extraction, Visit, VisitReview
-from .terminology import CAREGIVER, DIAGNOSIS_QUESTIONS, PATIENT_SPEAKER, TERMS, reported_terms
+from .scheduling import local_today
+from .schemas import NEWBORN_WEIGHT_MAX_KG, Extraction, Visit, VisitReview
+from .visit_input import input_fields
+from .terminology import CAREGIVER, DIAGNOSIS_QUESTIONS, PATIENT_SPEAKER, TERMS, family_reports, reported_terms
 
 CONFIRM = {
     "save", "save it", "yes save it", "yes save", "confirm",
@@ -39,17 +40,17 @@ def spoken_command(text):
 GENERAL_HEALTH = re.compile(r"\bgeneral health visit\b", re.I)
 
 
-def deterministic(text: str) -> Extraction:
+NEWBORN_WEIGHT_PROMPT = "That weight seems unusually high for a newborn. Please confirm the weight in kilograms."
+
+
+def deterministic(text: str, *, issues=None, waiting=None) -> Extraction:
+    patch, problems = input_fields(text, waiting=waiting)
     text = text.lower()
-    patch = {}
-    identifier = re.search(r"(?:beneficiary id|लाभार्थी आईडी)\s*(?:is|है|[:=])?\s*([a-z0-9][a-z0-9_-]{0,79})(?![a-z0-9_-])", text)
-    if identifier and any(char.isdigit() for char in identifier[1]):
-        patch["beneficiary_id"] = identifier[1].upper()
     categories = {
         "antenatal": r"\bantenatal\b|गर्भावस्था",
         "postnatal": r"\bpostnatal\b|प्रसव के बाद",
         "newborn": r"\bnewborn\b|नवजात",
-        "immunisation": r"\bimmuni[sz]ation\b|टीकाकरण",
+        "immunisation": r"^immuni[sz]ation[.!]?$|\bimmuni[sz]ation visit\b|टीकाकरण",
         "general_health": GENERAL_HEALTH,
         "other": r"\bother visit\b|अन्य विज़िट",
     }
@@ -64,17 +65,20 @@ def deterministic(text: str) -> Extraction:
     pressure = re.search(r"(?:\bbp\b|blood pressure|रक्तचाप)\s*(?:is|है|[:=])?\s*(\d+)\s*(?:/|over)\s*(\d+)", text)
     if pressure:
         patch["bp_systolic"], patch["bp_diastolic"] = map(int, pressure.groups())
-    due = re.search(r"(?:vaccinations? due|vaccines? due|बाकी टीके)\s*(?:are|हैं|[:=])?\s*([a-z0-9-]+(?:\s*(?:,|and)\s*[a-z0-9-]+)*)", text)
+    due = re.search(r"(?:vaccinations? due|vaccines? due|बाकी टीके)\s*[:=]?\s*"
+                    r"((?:bcg|opv-?\d*|polio)(?:\s*(?:,|and)\s*(?:bcg|opv-?\d*|polio))*)"
+                    r"(?=\s*[.!।]|$)", text)
     if due:
-        patch["vaccinations_due"] = [x.strip().upper() for x in re.split(r",|\band\b", due[1])]
-    next_visit = re.search(r"(?:next visit|अगली विज़िट)\s*(?:is|on|है|[:=])?\s*(\d{4}-\d{2}-\d{2}|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", text)
-    if next_visit:
-        day = next_visit[1]
-        weekdays = "monday tuesday wednesday thursday friday saturday sunday".split()
-        if day in weekdays:
-            today = date.today()
-            day = today + timedelta(days=(weekdays.index(day) - today.weekday()) % 7 or 7)
-        patch["next_visit_date"] = day
+        patch["vaccinations_due"] = [item.strip().upper() for item in re.split(r",|\band\b", due[1])]
+        problems.pop("vaccination_plans", None)
+    if "weight_kg" in patch and not 0 < patch["weight_kg"] <= 350:
+        patch.pop("weight_kg")
+        problems["weight_kg"] = "Please repeat the weight in kilograms."
+    if patch.get("visit_type") == "newborn" and patch.get("weight_kg", 0) > NEWBORN_WEIGHT_MAX_KG:
+        patch.pop("weight_kg")
+        problems["weight_kg"] = NEWBORN_WEIGHT_PROMPT
+    if issues is not None:
+        issues.update(problems)
     return Extraction(intent="provide_info", patch=Visit.model_validate(patch))
 
 
@@ -93,6 +97,8 @@ class Dialogue:
     caregiver_speaking: bool = False
     awaiting_other_concerns: bool = False
     transcript_correction: str | None = None
+    field_issues: dict[str, str] = field(default_factory=dict)
+    attributed_conditions: dict[tuple[str, str], str] = field(default_factory=dict)
 
     def pending_diagnoses(self):
         return [term for term in [self.pending_condition, *self.remaining_questions] if term is not None]
@@ -107,6 +113,14 @@ class Dialogue:
             blockers.append("Answer the diagnosis questions or remove the incorrect concerns.")
         if self.needs_clarification:
             blockers.append("Clarify the uncertain report or explicitly exclude it from this visit.")
+        for message in self.field_issues.values():
+            if message not in blockers:
+                blockers.append(message)
+        today = local_today()
+        if self.visit.next_visit_date and self.visit.next_visit_date < today:
+            blockers.append("The next-visit date is in the past.")
+        if any(plan.due_date and plan.due_date < today for plan in self.visit.vaccination_plans):
+            blockers.append("A vaccination due date is in the past.")
         return blockers
 
     def apply_review(self, review: VisitReview):
@@ -116,7 +130,19 @@ class Dialogue:
                 or not review.diagnosis_answers.keys() <= selected.intersection(pending)):
             raise ValueError("Unknown reported concern or clarification")
         changes = review.model_dump(include=set(Visit.model_fields), exclude_unset=True)
-        self.visit = Visit.model_validate({**self.visit.model_dump(), **changes})
+        visit = Visit.model_validate({**self.visit.model_dump(), **changes})
+        if (visit.next_visit_date and visit.next_visit_date < local_today()) or any(
+            plan.due_date and plan.due_date < local_today() for plan in visit.vaccination_plans
+        ):
+            raise ValueError("Follow-up dates must be today or later.")
+        self.visit = visit
+        for name, value in changes.items():
+            if value is not None:
+                self.field_issues.pop(name, None)
+        if review.retained_contextual_conditions is not None:
+            retained = set(review.retained_contextual_conditions)
+            self.attributed_conditions = {key: value for key, value in self.attributed_conditions.items()
+                                          if ":".join(key) in retained}
         self.conditions = {term: source for term, source in self.conditions.items() if term in selected}
         for term in review.added_conditions:
             self.conditions.setdefault(term, "patient_reported")
@@ -141,7 +167,9 @@ class Dialogue:
         return f"You mentioned {self.pending_condition}. Has a healthcare professional previously diagnosed this condition?"
 
     def condition_details(self):
-        return [{"term": term, "source": source} for term, source in self.conditions.items()]
+        return ([{"term": term, "source": source} for term, source in self.conditions.items()]
+                + [{"term": term, "subject": subject, "source": source}
+                   for (subject, term), source in self.attributed_conditions.items()])
 
     async def confirm(self, store):
         if self.state == "SAVED":
@@ -212,12 +240,38 @@ class Dialogue:
         )
         if ambiguous or reported:
             self.needs_clarification = ambiguous
+        contextual = family_reports(text)
+        for item in contextual:
+            self.attributed_conditions[item] = "patient_reported"
         new_terms = [term for term in reported if term not in self.conditions]
         for term in new_terms:
             self.conditions[term] = "patient_reported"
+        problems = {}
         try:
-            result = await extract(text, self.visit) if extract else deterministic(text)
-            patch = result.patch.model_dump(exclude_unset=True, exclude_none=True)
+            local = deterministic(text, issues=problems, waiting=next(iter(self.field_issues), "weight_kg" if self.visit.visit_type == "newborn" and self.visit.weight_kg is None else None))
+            local_patch = local.patch.model_dump(exclude_unset=True, exclude_none=True)
+            result = local
+            if extract:
+                try:
+                    result = await extract(text, self.visit)
+                except (ValidationError, ValueError):
+                    pass
+            patch = {**result.patch.model_dump(exclude_unset=True, exclude_none=True), **local_patch}
+            # IDs and schedules require an explicit, locally validated spoken value.
+            for key in ("beneficiary_id", "next_visit_date", "vaccination_plans", "vaccinations_due"):
+                if key not in local_patch:
+                    patch.pop(key, None)
+            if patch.get("visit_type", self.visit.visit_type) == "newborn":
+                weight = patch.get("weight_kg", self.visit.weight_kg)
+                if weight is not None and weight > NEWBORN_WEIGHT_MAX_KG:
+                    problems["weight_kg"] = NEWBORN_WEIGHT_PROMPT
+                    patch.pop("weight_kg", None)
+                    if self.visit.weight_kg is not None and self.visit.weight_kg > NEWBORN_WEIGHT_MAX_KG:
+                        patch["weight_kg"] = None
+            if "vaccination_plans" in patch:
+                plans = {plan.name: plan.model_dump() for plan in self.visit.vaccination_plans}
+                plans.update({plan["name"]: plan for plan in patch["vaccination_plans"]})
+                patch["vaccination_plans"] = list(plans.values())
             if GENERAL_HEALTH.search(text) and patch.get("visit_type") in (None, "other", "general_health"):
                 patch["visit_type"] = "general_health"
             if patch.get("visit_type", self.visit.visit_type) == "newborn" and "temperature_c" in patch:
@@ -234,6 +288,10 @@ class Dialogue:
             return " ".join(filter(None, (self.phrases["danger"] if self.danger else "", self.phrases["unclear"])))
 
         self.visit = merged
+        for name, value in patch.items():
+            if value is not None:
+                self.field_issues.pop(name, None)
+        self.field_issues.update(problems)
         # Preserve affirmative symptom evidence for the visit. Temperature is
         # re-evaluated when corrected.
         signs = assess(self.visit, "\n".join(self.notes), result.danger_candidates)
@@ -242,15 +300,40 @@ class Dialogue:
         self.remaining_questions.extend(term for term in new_terms if term in DIAGNOSIS_QUESTIONS)
         if self.pending_condition is None and self.remaining_questions:
             self.pending_condition = self.remaining_questions.pop(0)
+        if problems:
+            self.state = "LISTENING"
+            return " ".join(filter(None, [alert, *problems.values()]))
         if self.needs_clarification:
             self.state = "LISTENING"
             return " ".join(filter(None, (alert, "Can you clarify which concern applies to the patient and what you mean?")))
         if self.pending_condition:
             self.state = "LISTENING"
             return " ".join(filter(None, (alert, self.diagnosis_question())))
+        acknowledgements = []
+        if patch.get("beneficiary_id"):
+            acknowledgements.append(f"Beneficiary ID {' '.join(self.visit.beneficiary_id)} recorded.")
+        if patch.get("weight_kg") is not None:
+            acknowledgements.append(f"Weight recorded as {self.visit.weight_kg:g} kilograms.")
+        if patch.get("next_visit_date"):
+            acknowledgements.append(f"Next visit scheduled for {self.visit.next_visit_date:%d %B %Y}.")
+        if local_patch.get("vaccination_plans"):
+            for plan in local.patch.vaccination_plans:
+                label = f"{plan.name} vaccination" if plan.name else "Vaccination"
+                if plan.due_date:
+                    acknowledgements.append(f"{label} follow-up recorded for {plan.due_date:%d %B %Y}.")
+                else:
+                    acknowledgements.append(f"{label} recorded as {plan.status}.")
         if not self.visit.beneficiary_id or not self.visit.visit_type:
-            return " ".join(filter(None, (alert, self.phrases["missing"])))
-        if not patch and not reported and not assess(self.visit, text, result.danger_candidates).difference(
+            self.state = "LISTENING"
+            prompt = "What type of visit is this?" if self.visit.beneficiary_id else "What is the four-digit beneficiary ID?"
+            return " ".join(filter(None, [alert, *acknowledgements, prompt]))
+        if patch.get("visit_type") == "newborn" and self.visit.weight_kg is None:
+            self.state = "LISTENING" if self.field_issues else "CONFIRMING"
+            return " ".join(filter(None, [alert, *acknowledgements, "Newborn visit recorded. What is the baby's weight in kilograms?"]))
+        if self.field_issues:
+            self.state = "LISTENING"
+            return " ".join(filter(None, [alert, *acknowledgements, *self.field_issues.values()]))
+        if not patch and not reported and not contextual and not assess(self.visit, text, result.danger_candidates).difference(
             {"newborn_high_temperature", "newborn_low_temperature"}
         ):
             self.state = "LISTENING"
@@ -260,10 +343,10 @@ class Dialogue:
         fields["beneficiary_id"] = " ".join(fields["beneficiary_id"])
         fields["visit_type"] = self.phrases["types"].get(fields["visit_type"], fields["visit_type"].replace("_", " "))
         spoken = []
-        for name, label in zip(Visit.model_fields, self.phrases["fields"]):
+        for name, label in zip((key for key in Visit.model_fields if key != "vaccination_plans"), self.phrases["fields"]):
             if name in fields:
                 value = fields[name]
                 spoken.append(f"{label}: {', '.join(value) if isinstance(value, list) else value}.")
         self.awaiting_other_concerns = bool(reported)
         followup = OTHER_CONCERNS_QUESTION if self.awaiting_other_concerns else self.phrases["confirm"]
-        return " ".join(filter(None, [alert, *spoken, followup]))
+        return " ".join(filter(None, [alert, *acknowledgements, *spoken, followup]))

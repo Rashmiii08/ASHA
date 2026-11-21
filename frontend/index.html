@@ -93,6 +93,10 @@
             <div class="section-header"><h2>Visit details</h2><span id="draft-label" class="muted">Draft</span></div>
             <div id="danger" role="alert" hidden></div>
             <dl id="details"></dl>
+            <section aria-labelledby="vaccination-heading">
+              <h3 id="vaccination-heading">Vaccination schedule</h3>
+              <ul id="vaccination-plans"></ul>
+            </section>
             <section aria-labelledby="reported-heading">
               <h3 id="reported-heading">Reported Health Concerns</h3>
               <p id="reported-empty" class="muted">No concerns recorded.</p>
@@ -102,7 +106,7 @@
               <summary>Edit visit details</summary>
               <form id="edit-visit">
                 <label for="edit-beneficiary">Beneficiary ID</label>
-                <input id="edit-beneficiary" maxlength="80">
+                <input id="edit-beneficiary" inputmode="numeric" pattern="[0-9]{4}" title="Enter exactly four numeric digits">
                 <label for="edit-visit-type">Visit type</label>
                 <select id="edit-visit-type">
                   <option value="">Select a visit type</option>
@@ -119,6 +123,10 @@
                 <label for="edit-diastolic">Diastolic blood pressure (mmHg)</label><input id="edit-diastolic" type="number" min="15" max="200">
                 <label for="edit-next-visit">Next visit date</label><input id="edit-next-visit" type="date">
                 <label for="edit-vaccinations">Vaccinations due (comma-separated)</label><input id="edit-vaccinations" maxlength="656">
+                <fieldset><legend>Vaccination schedule</legend>
+                  <div id="edit-vaccination-plans"></div>
+                  <button id="add-vaccination-plan" type="button" class="secondary">Add vaccination</button>
+                </fieldset>
                 <fieldset id="edit-concerns" hidden><legend>Keep these patient-reported concerns</legend><div id="edit-concern-list"></div></fieldset>
                 <label for="add-concern">Add a patient-reported concern</label><select id="add-concern"></select>
                 <label id="exclude-unclear-label" hidden><input id="exclude-unclear" type="checkbox"> Exclude the unresolved report from the structured visit</label>

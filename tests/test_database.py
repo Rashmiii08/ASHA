@@ -11,12 +11,12 @@ def test_encryption_dedup_and_purge(tmp_path):
     key = demo_key(keyfile)
     assert key == demo_key(keyfile)
     register = Register(path, key)
-    record = Dialogue("en", state="CONFIRMING", visit=Visit(beneficiary_id="DEMO-SECRET", visit_type="newborn"),
+    record = Dialogue("en", state="CONFIRMING", visit=Visit(beneficiary_id="9123", visit_type="newborn"),
                       notes=["Private synthetic transcript"])
     register.insert(record)
     register.insert(record)
     assert len(register.list()) == 1
-    assert b"DEMO-SECRET" not in path.read_bytes()
+    assert b"9123" not in path.read_bytes()
     assert b"Private synthetic transcript" not in path.read_bytes()
     with register.connection() as db:
         payload = db.execute("SELECT payload FROM visits").fetchone()[0]
@@ -24,3 +24,44 @@ def test_encryption_dedup_and_purge(tmp_path):
     assert "transcript" not in register.list()[0]
     purge(path)
     assert register.list() == []
+
+
+def test_persistent_visit_and_vaccination_followups_are_independent_and_deduplicated(tmp_path):
+    from datetime import timedelta
+
+    from backend.scheduling import local_today
+    from backend.schemas import VaccinationPlan
+
+    path = tmp_path / "encrypted.sqlite"
+    key = Fernet.generate_key()
+    due = local_today() + timedelta(days=7)
+    visit = Visit(
+        beneficiary_id="0123", visit_type="newborn", weight_kg=3.5, next_visit_date=due,
+        vaccination_plans=[VaccinationPlan(name="BCG", status="due", due_date=due)],
+    )
+    store = Register(path, key)
+    first = Dialogue("en", visit=visit, state="CONFIRMING")
+    store.insert(first)
+    store.insert(first)
+    store.insert(Dialogue("en", visit=visit, state="CONFIRMING"))
+    rows = Register(path, key).list()
+    assert len(rows) == 2 and sum(len(row["followups"]) for row in rows) == 2
+    assert store.complete_followup(first.draft_id, "vaccination-0")
+    by_kind = {item["kind"]: item for row in store.list() for item in row["followups"]}
+    assert by_kind["vaccination"]["completed"]
+    assert not by_kind["visit"]["completed"]
+    assert b"BCG" not in path.read_bytes()
+
+
+def test_legacy_identifier_and_followup_are_read_without_migration(tmp_path):
+    path = tmp_path / "legacy.db"
+    store = Register(path, Fernet.generate_key())
+    payload = store.encode({"beneficiary_id": "DEMO-OLD", "next_visit_date": "2020-01-01", "followup_completed": False})
+    with store.connection() as db:
+        db.execute("INSERT INTO visits VALUES (?, ?, ?)", ("legacy", "2020-01-01", payload))
+    record, = store.list()
+    assert record["beneficiary_id"] == "DEMO-OLD"
+    assert record["followups"][0]["date"] == "2020-01-01"
+    with store.connection() as db:
+        assert db.execute("SELECT payload FROM visits").fetchone()[0] == payload
+    assert store.complete_followup("legacy")

@@ -12,15 +12,15 @@ def test_confirm_and_correct():
         dialogue = Dialogue("en")
         await dialogue.process("yes, save it", None, store)
         assert not saved
-        await dialogue.process("Beneficiary ID DEMO-4821, newborn, weight 2.7", None, store)
+        await dialogue.process("Beneficiary ID 4821, newborn, weight 2.7", None, store)
         await dialogue.process("No, the weight is 2.8 kg.", None, store)
         assert dialogue.visit.weight_kg == 2.8
-        assert dialogue.visit.beneficiary_id == "DEMO-4821"
-        assert "D E M O - 4 8 2 1" in await dialogue.process("Weight is 2.8", None, store)
+        assert dialogue.visit.beneficiary_id == "4821"
+        assert "4 8 2 1" in await dialogue.process("Weight is 2.8", None, store)
         await dialogue.process("change beneficiary id please", None, store)
         await dialogue.process("yes save it", None, store)
         assert not saved
-        await dialogue.process("beneficiary id DEMO-4821", None, store)
+        await dialogue.process("beneficiary id 4821", None, store)
         await dialogue.process("yes save it", None, store)
         await dialogue.process("yes save it", None, store)
         assert len(saved) == 1
@@ -30,18 +30,18 @@ def test_confirm_and_correct():
 def test_structured_extraction():
     extracted = deterministic(
         "Beneficiary ID 4821. Antenatal. Weight 2.8. Vaccines due BCG, OPV-0. "
-        "Next visit 2026-11-25. Temperature 37.5. BP 120 over 80."
+        "Next visit 2099-11-25. Temperature 37.5. BP 120 over 80."
     )
     assert extracted.patch.model_dump(mode="json") == {
         "beneficiary_id": "4821", "visit_type": "antenatal", "weight_kg": 2.8,
-        "vaccinations_due": ["BCG", "OPV-0"], "next_visit_date": "2026-11-25",
-        "temperature_c": 37.5, "bp_systolic": 120, "bp_diastolic": 80,
+        "vaccinations_due": ["BCG", "OPV-0"], "next_visit_date": "2099-11-25",
+        "temperature_c": 37.5, "bp_systolic": 120, "bp_diastolic": 80, "vaccination_plans": [],
     }
 
 
 def test_hindi_code_mixing():
-    patch = deterministic("लाभार्थी आईडी DEMO-83, नवजात, वजन 2.8, तापमान 37.6").patch
-    assert (patch.beneficiary_id, patch.visit_type, patch.weight_kg) == ("DEMO-83", "newborn", 2.8)
+    patch = deterministic("लाभार्थी आईडी 0083, नवजात, वजन 2.8, तापमान 37.6").patch
+    assert (patch.beneficiary_id, patch.visit_type, patch.weight_kg) == ("0083", "newborn", 2.8)
 
 
 def test_reported_condition_clarification_does_not_save():
@@ -52,7 +52,7 @@ def test_reported_condition_clarification_does_not_save():
 
     async def exercise():
         dialogue = Dialogue("en")
-        await dialogue.process("Beneficiary ID DEMO-42. Other visit.", None, store)
+        await dialogue.process("Beneficiary ID 0042. Other visit.", None, store)
         report = "I have sugar."
         reply = await dialogue.process(report, None, store)
         assert "healthcare professional previously diagnosed" in reply
@@ -72,7 +72,7 @@ def test_scopes_maternal_temperature_to_mother():
     async def exercise():
         dialogue = Dialogue("en")
         await dialogue.process(
-            "Beneficiary ID DEMO-67, newborn, mother temperature 38 and baby temperature 36.8.",
+            "Beneficiary ID 0067, newborn, mother temperature 38 and baby temperature 36.8.",
             None, None,
         )
         assert dialogue.visit.temperature_c == 36.8
@@ -115,7 +115,7 @@ def test_natural_diagnosis_replies_advance_without_saving_or_reextracting():
 
     async def exercise():
         dialogue = Dialogue("en")
-        await dialogue.process("Beneficiary ID DEMO-42. General health visit. The patient has sugar and high BP.", None, reject)
+        await dialogue.process("Beneficiary ID 0042. General health visit. The patient has sugar and high BP.", None, reject)
         assert dialogue.pending_condition == "Diabetes"
         reply = await dialogue.process("Maybe.", reject, reject)
         assert "couldn’t tell" in reply and "Diabetes" in reply
@@ -135,7 +135,7 @@ def test_natural_diagnosis_replies_advance_without_saving_or_reextracting():
         reply = await dialogue.process("Not yet.", reject, reject)
         assert "Confirm & Save" in reply
         assert dialogue.state == "CONFIRMING"
-        assert dialogue.visit.beneficiary_id == "DEMO-42"
+        assert dialogue.visit.beneficiary_id == "0042"
         assert dialogue.visit.visit_type == "general_health"
         assert dialogue.notes[-4:] == ["Maybe.", "Yes, they have.", "No.", "Not yet."]
         # A bare yes is never a substitute for explicit save intent.
@@ -148,7 +148,7 @@ def test_natural_diagnosis_replies_advance_without_saving_or_reextracting():
 def test_correct_answers_diagnosis_and_yes_to_other_concerns_prompts_for_details():
     async def exercise():
         dialogue = Dialogue("en")
-        await dialogue.process("Beneficiary ID DEMO-43. General health visit. I have sugar.", None, None)
+        await dialogue.process("Beneficiary ID 0043. General health visit. I have sugar.", None, None)
         assert "other health concerns" in await dialogue.process("Correct.", None, None)
         assert "What other health concern" in await dialogue.process("Yes.", None, None)
         assert dialogue.state == "LISTENING"
