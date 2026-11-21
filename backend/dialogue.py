@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from .danger import OTHER_SUBJECT, assess, newborn_clauses
 from .phrases import PHRASES
 from .scheduling import local_today
-from .schemas import NEWBORN_WEIGHT_MAX_KG, Extraction, Visit, VisitReview
+from .schemas import NEWBORN_WEIGHT_MAX_KG, Extraction, Visit, VisitLocation, VisitReview
 from .visit_input import input_fields
 from .terminology import CAREGIVER, DIAGNOSIS_QUESTIONS, PATIENT_SPEAKER, TERMS, family_reports, reported_terms
 
@@ -97,6 +97,7 @@ class Dialogue:
     caregiver_speaking: bool = False
     awaiting_other_concerns: bool = False
     transcript_correction: str | None = None
+    location: VisitLocation | None = None
     field_issues: dict[str, str] = field(default_factory=dict)
     attributed_conditions: dict[tuple[str, str], str] = field(default_factory=dict)
 

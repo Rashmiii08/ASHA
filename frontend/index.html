@@ -7,6 +7,8 @@
   <title>Voice Field Register</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <script src="/vendor/leaflet/leaflet.js" defer></script>
   <link rel="manifest" href="/manifest.json">
   <script type="module" src="/app.js"></script>
 </head>
@@ -63,7 +65,8 @@
         <div class="voice-grid">
           <div class="card session">
             <div class="section-header"><h2>Voice session</h2><span class="status-chip" id="phase" role="status">Ready</span></div>
-            <div class="microphone"><button id="start-voice" class="mic-button" aria-label="Start voice visit">
+            <p class="muted" id="location-consent">Starting a visit requests one GPS reading. Allow it to attach the location to this visit, or decline and continue without location.</p>
+            <div class="microphone"><button id="start-voice" class="mic-button" aria-label="Start voice visit" aria-describedby="location-consent">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-3 0h6"/></svg>
             </button><canvas id="wave" height="52" width="320" aria-hidden="true"></canvas></div>
             <div class="voice-actions"><button class="secondary" id="stop-voice" disabled>Stop session</button><button class="secondary" id="interrupt" disabled>Interrupt</button><button type="button" class="secondary" id="finish-utterance" hidden disabled>Finish speaking</button></div>
@@ -93,6 +96,24 @@
             <div class="section-header"><h2>Visit details</h2><span id="draft-label" class="muted">Draft</span></div>
             <div id="danger" role="alert" hidden></div>
             <dl id="details"></dl>
+            <section aria-labelledby="visit-location-heading">
+              <h3 id="visit-location-heading">Visit Location</h3>
+              <p id="location-status" role="status">Start a visit to request location.</p>
+              <dl id="location-details" hidden>
+                <div><dt>Latitude</dt><dd id="location-latitude"></dd></div>
+                <div><dt>Longitude</dt><dd id="location-longitude"></dd></div>
+                <div><dt>Accuracy</dt><dd id="location-accuracy"></dd></div>
+                <div><dt>Captured</dt><dd id="location-captured"></dd></div>
+              </dl>
+              <div class="voice-actions">
+                <button id="refresh-location" class="secondary" type="button" disabled>Refresh Location</button>
+                <button id="skip-location" class="secondary" type="button" hidden>Continue without location</button>
+                <button id="show-location-map" class="secondary" type="button" hidden>Show map</button>
+              </div>
+              <p id="map-privacy" class="muted" hidden>The preview requests map tiles from OpenStreetMap for the surrounding area.</p>
+              <p id="location-map-message" role="status" hidden></p>
+              <div id="location-map" role="region" aria-label="Interactive visit location map" hidden></div>
+            </section>
             <section aria-labelledby="vaccination-heading">
               <h3 id="vaccination-heading">Vaccination schedule</h3>
               <ul id="vaccination-plans"></ul>

@@ -66,3 +66,13 @@ Back up the existing encrypted SQLite database before deploying this release. De
 Spoken relative dates are resolved using India Standard Time. Calendar-month offsets clamp to the last day of a shorter month. **Next week** means seven days later. A month-and-day date without a year uses the current year and needs clarification if it has already passed. Vaccination dates are based only on the worker’s input. An unnamed vaccination date appears as a vaccination follow-up.
 
 After deployment, use a synthetic four-digit beneficiary ID to verify voice capture, a relative next-visit date, a vaccination reminder, explicit **Save Visit**, and completion from **Follow-ups**. Check Visit History after restarting the Render service to verify that its configured storage actually persists.
+
+## Deploy visit location on Render
+
+Deploy `main` on the existing Render service. Keep the same `DATABASE_PATH`, `DATA_KEY`, and Gnani secrets. The optional GPS object lives inside the existing Fernet-encrypted payload. This update adds no SQLite columns and does not rewrite earlier visits. Keep the same persistent disk and usual database backup procedure.
+
+Open the public HTTPS URL and verify one synthetic visit. The app requests one browser geolocation reading when the worker starts a new visit or taps **Refresh Location**. An unavailable, denied, timed-out, or skipped reading does not prevent a save. Draft coordinates stay in server session memory and are recovered with the existing draft session. They are neither persisted in browser storage nor included in speech extraction or diagnostics.
+
+Location input and retrieval require the app to see HTTPS/WSS. If Render terminates TLS before Uvicorn and location is rejected or the saved map link is missing, check that Uvicorn receives and trusts the proxy's forwarded protocol headers. Use `--proxy-headers` with `--forwarded-allow-ips` restricted to your trusted ingress IPs or CIDRs. Keep the public endpoint on HTTPS. Serve this prototype within its existing trusted deployment and use synthetic data for testing.
+
+The preview uses locally bundled Leaflet 1.9.4 and OpenStreetMap tiles. Tiles are requested only after the worker chooses **Show map**, which reveals the surrounding map area to OpenStreetMap. Opening a saved map link shares the pinned coordinates. The app does not reverse-geocode coordinates or substitute an IP-based location. Follow the tile usage policy for the deployed traffic volume. [OpenStreetMap tile policy](https://operations.osmfoundation.org/policies/tiles/)

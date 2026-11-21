@@ -16,6 +16,9 @@ const measurementEditors = {
   weight_kg: "edit-weight", temperature_c: "edit-temperature",
   bp_systolic: "edit-systolic", bp_diastolic: "edit-diastolic",
 };
+let visitLocation = null, pendingLocation = null, locationRequest = 0, locating = false;
+let locationStatus = "Start a visit to request location.";
+let locationMap, locationPin, mappedLocation;
 let reviewing = false, settling = false, saving = false, turnBusy = false, settleTimer, draftRevision;
 let active = false, starting = false, socket, token, retry, attempts = 0, ready = false;
 let microphoneFrames = 0, nonzeroMicrophoneFrames = 0, droppedAudioFrames = 0;
@@ -54,6 +57,104 @@ function navigate() {
   renderRecords();
 }
 
+function closeLocationMap() {
+  locationMap?.remove();
+  locationMap = locationPin = mappedLocation = null;
+  $("location-map").hidden = true;
+  $("location-map-message").hidden = true;
+}
+
+function renderLocation() {
+  const point = pendingLocation?.location ?? visitLocation;
+  $("location-status").textContent = locationStatus;
+  $("location-details").hidden = !point;
+  $("map-privacy").hidden = !point;
+  $("show-location-map").hidden = !point;
+  $("show-location-map").textContent = locationMap ? "Hide map" : "Show map";
+  $("refresh-location").disabled = locating || !!pendingLocation || saving || draftState === "SAVED" || (!active && !starting);
+  $("skip-location").hidden = !locating || !!point;
+  const canReview = ready && draftState !== "SAVED" && (config?.mode !== "real" || reviewing);
+  $("save-visit").disabled = !canReview || settling || saving || turnBusy || locating || !!pendingLocation;
+  if (!point) {
+    closeLocationMap();
+    return;
+  }
+  $("location-latitude").textContent = point.latitude.toFixed(6);
+  $("location-longitude").textContent = point.longitude.toFixed(6);
+  $("location-accuracy").textContent = `±${Math.round(point.accuracy_m)} m`;
+  $("location-captured").textContent = new Date(point.captured_at).toLocaleString();
+  if (locationMap && mappedLocation !== point) {
+    mappedLocation = point;
+    const coordinates = [point.latitude, point.longitude];
+    locationPin.setLatLng(coordinates);
+    locationMap.setView(coordinates, locationMap.getZoom());
+  }
+}
+
+function toggleLocationMap() {
+  if (locationMap) {
+    closeLocationMap();
+    renderLocation();
+    return;
+  }
+  const point = pendingLocation?.location ?? visitLocation;
+  if (!point || !window.L) return;
+  $("location-map-message").hidden = true;
+  $("location-map").hidden = false;
+  const coordinates = [point.latitude, point.longitude];
+  locationMap = L.map("location-map").setView(coordinates, 15);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, referrerPolicy: "origin",
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  }).on("tileerror", () => {
+    $("location-map-message").textContent = "Map tiles are unavailable. Your captured coordinates are still available.";
+    $("location-map-message").hidden = false;
+  }).addTo(locationMap);
+  locationPin = L.marker(coordinates, {title: "Captured visit location", alt: "Captured visit location"}).addTo(locationMap);
+  mappedLocation = point;
+  renderLocation();
+}
+
+function captureLocation() {
+  const requestId = ++locationRequest;
+  if (location.protocol !== "https:" || !window.isSecureContext || !navigator.geolocation) {
+    locationStatus = "GPS location is unavailable. Open the app over HTTPS with a supported browser. You can continue without location.";
+    renderLocation();
+    return;
+  }
+  locating = true;
+  locationStatus = "Waiting for location permission and a GPS reading…";
+  renderLocation();
+  function failed(error) {
+    if (requestId !== locationRequest) return;
+    locating = false;
+    const reason = error.code === 1 ? "Location permission was denied." : error.code === 3
+      ? "GPS capture timed out." : "GPS location is unavailable.";
+    locationStatus = `${reason} ${visitLocation || pendingLocation ? "The last captured location is retained." : "You can continue without location."}`;
+    renderLocation();
+  }
+  try {
+    navigator.geolocation.getCurrentPosition(position => {
+      if (requestId !== locationRequest) return;
+      const {latitude, longitude, accuracy} = position.coords;
+      const timestamp = new Date(position.timestamp);
+      if (![latitude, longitude, accuracy, timestamp.getTime()].every(Number.isFinite)
+          || Math.abs(latitude) > 90 || Math.abs(longitude) > 180 || accuracy < 0) {
+        failed({code: 2});
+        return;
+      }
+      locating = false;
+      pendingLocation = {
+        type: "set_visit_location", request_id: requestId,
+        location: {latitude, longitude, accuracy_m: accuracy, captured_at: timestamp.toISOString()},
+      };
+      locationStatus = "GPS reading captured. Waiting for the visit to receive it.";
+      renderLocation();
+      transmit(pendingLocation);
+    }, failed, {enableHighAccuracy: true, timeout: 10000, maximumAge: 0});
+  } catch { failed({code: 2}); }
+}
+
 function setPhase(value) {
   phase = value;
   $("phase").textContent = value;
@@ -68,13 +169,13 @@ function setPhase(value) {
   $("finish-utterance").disabled = !ready || reviewing;
   $("demo-send").disabled = !ready || reviewing || value === "Processing";
   const canReview = ready && draftState !== "SAVED" && (config?.mode !== "real" || reviewing);
-  $("save-visit").disabled = !canReview || settling || saving || turnBusy;
   $("visit-save-help").textContent = draftState === "SAVED" ? "Visit saved successfully." :
     settling || turnBusy ? "Waiting for speech processing before saving." :
     !canReview ? "Stop recording to review and save the visit." :
     (reviewInfo.blockers ?? []).join(" ");
   $("edit-draft").hidden = !ready || draftState === "SAVED" || (config?.mode === "real" && !reviewing);
   $("apply-edit").disabled = settling || saving || turnBusy;
+  renderLocation();
 }
 
 function vaccinationRow(plan = {}) {
@@ -190,6 +291,16 @@ function list(target, data, empty, followup = false) {
       date.append(node("small", item.followup_completed ? "Follow-up complete" : `Follow-up · ${item.next_visit_date}`));
     }
     row.append(name, date);
+    if (target === $("records") && item.location) {
+      const {latitude, longitude} = item.location;
+      if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        const map = node("a", "Open saved location map");
+        map.href = `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}#map=16/${latitude}/${longitude}`;
+        map.target = "_blank";
+        map.rel = "noopener noreferrer";
+        row.append(map);
+      }
+    }
     if (followup && item.scheduled.completed) row.append(node("small", "Completed"));
     if (followup && !item.scheduled.completed) {
       const button = node("button", "Mark complete", "secondary");
@@ -387,6 +498,7 @@ function receive(message) {
       if (!message.resumed) resetTranscript();
       token = message.session;
       ready = true;
+      if (pendingLocation) transmit(pendingLocation);
       voiceConnection = "Connected to Prisma";
       serverAudioChunks = prismaDiagnostics = undefined;
       if (config?.mode === "real") transmit({type: "heartbeat"});
@@ -400,7 +512,24 @@ function receive(message) {
       serverFinalSequence = message.final_sequence ?? 0;
       renderVoiceDiagnostics();
       break;
+    case "visit_location":
+      if (message.request_id === pendingLocation?.request_id) {
+        visitLocation = message.location;
+        pendingLocation = null;
+        if (!locating) locationStatus = "GPS location attached to this visit.";
+        renderLocation();
+      }
+      break;
+    case "location_error":
+      pendingLocation = null;
+      locationStatus = message.message;
+      renderLocation();
+      break;
     case "update":
+      if (!pendingLocation && Object.prototype.hasOwnProperty.call(message, "location")) {
+        visitLocation = message.location;
+        if (!locating && visitLocation) locationStatus = "GPS location attached to this visit.";
+      }
       draft = message.form;
       flagged = message.danger_flag;
       draftState = message.state;
@@ -575,6 +704,14 @@ async function start() {
   starting = true;
   const thisRun = ++voiceRun;
   setPhase("Starting");
+  if (!token) {
+    visitLocation = pendingLocation = null;
+    closeLocationMap();
+    captureLocation();
+  } else if (!visitLocation && !pendingLocation && !locating) {
+    locationStatus = "Use Refresh Location to capture a new GPS reading for this draft.";
+    renderLocation();
+  }
   let openedStream, openedContext;
   let startedCapture = false;
   try {
@@ -623,6 +760,12 @@ async function start() {
     connect();
   } catch (error) {
     if (thisRun !== voiceRun) return;
+    if (!token) {
+      locationRequest += 1;
+      locating = false;
+      pendingLocation = null;
+      locationStatus = "Start a visit to request location.";
+    }
     $("microphone-status").textContent = "Microphone · unavailable";
     notice(error.name === "NotAllowedError" ? "Microphone permission was denied. Allow access in browser settings and try again." :
       /^(Microphone capture requires|This browser does not support)/.test(error.message) ? error.message :
@@ -691,6 +834,16 @@ function pauseForReview() {
 }
 
 function stop(preserveDraft = false) {
+  locationRequest += 1;
+  locating = false;
+  pendingLocation = null;
+  if (!preserveDraft) {
+    visitLocation = null;
+    locationStatus = "Start a visit to request location.";
+    closeLocationMap();
+  } else if (draftState === "SAVED") {
+    locationStatus = visitLocation ? "Location saved with this visit." : "This visit was saved without location.";
+  }
   voiceRun += 1;
   active = ready = starting = reviewing = settling = saving = turnBusy = false;
   clearTimeout(settleTimer);
@@ -740,6 +893,14 @@ $("today").textContent = new Intl.DateTimeFormat(undefined, {weekday: "long", mo
 $("welcome-start").onclick = () => { changeLanguage($("welcome-language").value); location.hash = "dashboard"; };
 $("language").onchange = event => changeLanguage(event.target.value);
 $("start-voice").onclick = start;
+$("refresh-location").onclick = captureLocation;
+$("skip-location").onclick = () => {
+  locationRequest += 1;
+  locating = false;
+  locationStatus = "Continuing without a visit location.";
+  renderLocation();
+};
+$("show-location-map").onclick = toggleLocationMap;
 $("stop-voice").onclick = pauseForReview;
 $("interrupt").onclick = interrupt;
 $("finish-utterance").onclick = () => transmit({type: "finish_utterance"});
@@ -752,7 +913,7 @@ $("sample").onclick = () => {
   $("demo-text").focus();
 };
 function submitReview(type) {
-  if (!ready || settling || saving || turnBusy) return;
+  if (!ready || settling || saving || turnBusy || (type === "confirm_visit" && (locating || pendingLocation))) return;
   if (!$("edit-visit").checkValidity()) {
     $("edit-draft").open = true;
     $("edit-visit").reportValidity();

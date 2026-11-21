@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 from anyio import CancelScope
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 from starlette import websockets as starlette_ws
@@ -24,7 +24,7 @@ from .dialogue import Dialogue
 from .gnani.adapter import load_voice
 from .gnani.provider import GnaniProtocolError, GnaniUpgradeError, PrismaStream
 from .llm import configured_gemini
-from .schemas import Language, VisitReview
+from .schemas import Language, VisitLocationCapture, VisitReview
 from .terminology import TERMS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,8 +97,13 @@ def create_live_app():
                 "gemini_configured": bool(app.state.gemini)}
 
     @app.get("/api/visits")
-    async def visits():
-        return await run_in_threadpool(app.state.register.list)
+    async def visits(request: Request, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        records = await run_in_threadpool(app.state.register.list)
+        if request.url.scheme != "https":
+            for record in records:
+                record.pop("location", None)
+        return records
 
     @app.patch("/api/visits/{visit_id}/followup")
     async def complete(visit_id: UUID, request: Request, followup_id: str = "visit"):
@@ -124,6 +129,7 @@ def create_live_app():
             await socket.close(code=1008)
             return
         await socket.accept()
+        secure_location_transport = socket.url.scheme == "wss"
         session = None
         announced = False
         tasks = set()
@@ -175,6 +181,7 @@ def create_live_app():
                 "type": "update", "state": dialogue.state,
                 "form": {**dialogue.visit.model_dump(mode="json"), "reported_conditions": dialogue.condition_details()},
                 "revision": session.revision,
+                "location": dialogue.location.model_dump(mode="json") if secure_location_transport and dialogue.location else None,
                 "review": {
                     "concern_catalog": list(TERMS),
                     "pending_diagnoses": dialogue.pending_diagnoses(),
@@ -276,6 +283,21 @@ def create_live_app():
                     if finish is not None:
                         await finish()
                     await send({"type": "capture_paused"})
+                elif kind == "set_visit_location":
+                    if not secure_location_transport:
+                        await send({"type": "location_error", "message": "Location capture requires HTTPS."})
+                        continue
+                    if dialogue.state == "SAVED":
+                        await send({"type": "location_error", "message": "This visit has already been saved."})
+                        continue
+                    try:
+                        capture = VisitLocationCapture.model_validate(message)
+                    except ValidationError:
+                        await send({"type": "location_error", "message": "The GPS reading was invalid. Try refreshing the location."})
+                        continue
+                    dialogue.location = capture.location
+                    await send({"type": "visit_location", "request_id": capture.request_id,
+                                "location": capture.location.model_dump(mode="json")})
                 elif kind in ("edit_visit", "confirm_visit"):
                     if dialogue.state == "SAVED":
                         await update()

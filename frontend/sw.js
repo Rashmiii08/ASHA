@@ -1,6 +1,8 @@
-const cacheName = "field-register-shell-v10";
+const cacheName = "field-register-shell-v11";
 const shell = ["/", "/app.js", "/styles.css", "/audio-worklet.js", "/manifest.json",
-  "/icon-192.png", "/icon-512.png"];
+  "/icon-192.png", "/icon-512.png", "/vendor/leaflet/leaflet.js", "/vendor/leaflet/leaflet.css",
+  "/vendor/leaflet/images/marker-icon.png", "/vendor/leaflet/images/marker-icon-2x.png",
+  "/vendor/leaflet/images/marker-shadow.png"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(shell)));
 });

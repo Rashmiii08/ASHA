@@ -1,7 +1,7 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 from typing_extensions import Annotated
 
 
@@ -80,3 +80,27 @@ class VisitReview(Visit):
     diagnosis_answers: dict[str, bool] = Field(default_factory=dict, max_length=16)
     exclude_unclear_report: bool = False
     transcript_correction: str | None = Field(default=None, max_length=3000)
+
+
+class VisitLocation(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    latitude: float = Field(strict=True, ge=-90, le=90)
+    longitude: float = Field(strict=True, ge=-180, le=180)
+    accuracy_m: float = Field(strict=True, ge=0)
+    captured_at: AwareDatetime
+
+    @field_validator("captured_at", mode="before")
+    @classmethod
+    def require_timestamp(cls, value):
+        if not isinstance(value, (str, datetime)):
+            raise ValueError("Expected an ISO 8601 capture timestamp")
+        return value
+
+
+class VisitLocationCapture(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["set_visit_location"]
+    request_id: int = Field(strict=True, ge=1)
+    location: VisitLocation

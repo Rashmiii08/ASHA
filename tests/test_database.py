@@ -65,3 +65,26 @@ def test_legacy_identifier_and_followup_are_read_without_migration(tmp_path):
     with store.connection() as db:
         assert db.execute("SELECT payload FROM visits").fetchone()[0] == payload
     assert store.complete_followup("legacy")
+
+
+def test_location_is_encrypted_and_old_payloads_are_untouched(tmp_path):
+    from backend.schemas import VisitLocation
+
+    path = tmp_path / "location.sqlite"
+    key = Fernet.generate_key()
+    register = Register(path, key)
+    old = register.encode({"beneficiary_id": "9900", "next_visit_date": None})
+    with register.connection() as db:
+        db.execute("INSERT INTO visits VALUES (?, ?, ?)", ("old", "2020-01-01", old))
+
+    point = VisitLocation(latitude=12.345678, longitude=76.54321, accuracy_m=12, captured_at="2026-11-22T09:00:00Z")
+    register.insert(Dialogue("en", visit=Visit(beneficiary_id="1234", visit_type="other"),
+                             state="CONFIRMING", location=point))
+    reopened = Register(path, key)
+    rows = {record["beneficiary_id"]: record for record in reopened.list()}
+    assert rows["1234"]["location"] == point.model_dump(mode="json")
+    assert "location" not in rows["9900"]
+    assert b"12.345678" not in path.read_bytes()
+    with reopened.connection() as db:
+        assert db.execute("SELECT payload FROM visits WHERE id = 'old'").fetchone()[0] == old
+        assert [row[1] for row in db.execute("PRAGMA table_info(visits)")] == ["id", "created_at", "payload"]

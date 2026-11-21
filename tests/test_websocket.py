@@ -213,3 +213,43 @@ def test_save_rejects_invalid_manual_id_and_newborn_weight(client):
         ws.send_json({**payload, "beneficiary_id": "1234"})
         assert ws.receive_json()["state"] == "SAVED"
     assert client.get("/api/visits").json()[0]["beneficiary_id"] == "1234"
+
+
+def test_location_draft_recovery_save_and_secure_history(client):
+    point = {"latitude": 12.345678, "longitude": 76.54321, "accuracy_m": 8.5,
+             "captured_at": "2026-11-22T09:00:00Z"}
+    capture = {"type": "set_visit_location", "request_id": 1, "location": point}
+    with client.websocket_connect("/ws") as ws:
+        start(ws)
+        ws.send_json(capture)
+        assert ws.receive_json() == {"type": "location_error", "message": "Location capture requires HTTPS."}
+
+    with client.websocket_connect("wss://testserver/ws") as ws:
+        token, _ = start(ws)
+        ws.send_json({**capture, "location": {**point, "latitude": 99}})
+        assert ws.receive_json()["type"] == "location_error"
+        ws.send_json(capture)
+        assert ws.receive_json() == {"type": "visit_location", "request_id": 1, "location": point}
+        turn(ws, "Beneficiary ID 1234. General health visit.")
+
+    with client.websocket_connect("wss://testserver/ws") as ws:
+        _, restored = start(ws, token)
+        assert restored["location"] == point
+        ws.send_json({"type": "confirm_visit", "revision": restored["revision"]})
+        assert ws.receive_json()["state"] == "SAVED"
+        ws.send_json({**capture, "location": {**point, "latitude": 14}})
+        assert ws.receive_json()["message"] == "This visit has already been saved."
+    assert "location" not in client.get("/api/visits").json()[0]
+    secure_history = client.get("https://testserver/api/visits")
+    assert secure_history.headers["Cache-Control"] == "no-store"
+    assert secure_history.json()[0]["location"] == point
+
+
+def test_visit_can_be_saved_without_location(client):
+    with client.websocket_connect("wss://testserver/ws") as ws:
+        _, initial = start(ws)
+        assert initial["location"] is None
+        draft = turn(ws, "Beneficiary ID 4567. General health visit.")
+        ws.send_json({"type": "confirm_visit", "revision": draft["revision"]})
+        assert ws.receive_json()["state"] == "SAVED"
+    assert client.get("https://testserver/api/visits").json()[0]["location"] is None
