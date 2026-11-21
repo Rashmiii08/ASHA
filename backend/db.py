@@ -55,6 +55,7 @@ class Register:
         record = {
             **dialogue.visit.model_dump(mode="json"),
             "transcript": dialogue.notes,
+            "transcript_correction": dialogue.transcript_correction,
             "reported_conditions": dialogue.condition_details(),
             "danger_flag": bool(dialogue.danger),
             "danger_signs": sorted(dialogue.danger),
@@ -62,7 +63,7 @@ class Register:
             "followup_completed": False,
         }
         with self.connection() as db:
-            db.execute("INSERT OR IGNORE INTO visits VALUES (?, ?, ?)", (
+            db.execute("INSERT INTO visits VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING", (
                 dialogue.draft_id, datetime.now(timezone.utc).isoformat(), self.encode(record),
             ))
 
@@ -73,6 +74,7 @@ class Register:
         for visit_id, created_at, payload in rows:
             record = json.loads(self.cipher.decrypt(payload))
             record.pop("transcript", None)
+            record.pop("transcript_correction", None)
             records.append({**record, "id": visit_id, "created_at": created_at})
         return records
 

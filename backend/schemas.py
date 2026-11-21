@@ -33,11 +33,15 @@ class Extraction(BaseModel):
     danger_candidates: list[DangerSign] = Field(default_factory=list)
 
 
-class VisitReview(BaseModel):
+class VisitReview(Visit):
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["edit_visit"]
+    type: Literal["edit_visit", "confirm_visit"]
     revision: int = Field(strict=True, ge=0)
     beneficiary_id: Identifier | None
     visit_type: VisitType | None
     retained_conditions: list[str] = Field(max_length=16)
+    added_conditions: list[str] = Field(default_factory=list, max_length=16)
+    diagnosis_answers: dict[str, bool] = Field(default_factory=dict, max_length=16)
+    exclude_unclear_report: bool = False
+    transcript_correction: str | None = Field(default=None, max_length=3000)

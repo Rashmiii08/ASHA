@@ -25,6 +25,7 @@ from .gnani.adapter import load_voice
 from .gnani.provider import GnaniProtocolError, GnaniUpgradeError, PrismaStream
 from .llm import configured_gemini
 from .schemas import Language, VisitReview
+from .terminology import TERMS
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG = logging.getLogger(__name__)
@@ -174,6 +175,13 @@ def create_live_app():
                 "type": "update", "state": dialogue.state,
                 "form": {**dialogue.visit.model_dump(mode="json"), "reported_conditions": dialogue.condition_details()},
                 "revision": session.revision,
+                "review": {
+                    "concern_catalog": list(TERMS),
+                    "pending_diagnoses": dialogue.pending_diagnoses(),
+                    "needs_clarification": dialogue.needs_clarification,
+                    "blockers": dialogue.save_blockers(),
+                    "transcript_correction": dialogue.transcript_correction,
+                },
                 "danger_flag": bool(dialogue.danger), "latency_ms": latency,
             })
 
@@ -268,34 +276,37 @@ def create_live_app():
                     if finish is not None:
                         await finish()
                     await send({"type": "capture_paused"})
-                elif kind == "edit_visit":
-                    if dialogue.state == "SAVED" or (mode == "real" and not capture_paused):
-                        await error("Stop recording before editing an unsaved visit.")
-                    elif processing_turn or final_delivery_pending or not pending.empty() or message.get("revision") != session.revision:
-                        await error("The draft is still updating. Review the latest details before editing.")
-                    else:
-                        try:
-                            dialogue.apply_review(VisitReview.model_validate(message))
-                        except ValueError:
-                            await error("The draft changes are invalid. Check the beneficiary ID, visit type, and concerns.")
-                        else:
-                            session.revision += 1
-                            await update()
-                elif kind == "confirm_visit":
+                elif kind in ("edit_visit", "confirm_visit"):
                     if dialogue.state == "SAVED":
                         await update()
-                    elif mode == "real" and not capture_paused:
-                        await error("Stop microphone recording before confirming the visit.")
-                    elif processing_turn or final_delivery_pending or not pending.empty() or message.get("revision") != session.revision:
-                        await error("The draft is still updating. Review the latest details and confirm again.")
-                    elif dialogue.state != "CONFIRMING" or dialogue.pending_condition or dialogue.needs_clarification:
-                        await error("Complete the required details and answer any pending clarification before saving.")
-                    else:
+                        continue
+                    if mode == "real" and not capture_paused:
+                        await error("Stop recording before reviewing or saving the visit.")
+                        continue
+                    if processing_turn or final_delivery_pending or not pending.empty() or message.get("revision") != session.revision:
+                        await error("The draft is still updating. Review the latest details and try again.")
+                        continue
+                    async with turn_lock:
+                        if kind == "edit_visit" or "retained_conditions" in message:
+                            try:
+                                dialogue.apply_review(VisitReview.model_validate(message))
+                            except ValueError:
+                                await error("Check the beneficiary ID, visit type, measurements, and clarification answers.")
+                                continue
+                            session.revision += 1
+                        if kind == "edit_visit":
+                            await update()
+                            continue
+                        blockers = dialogue.save_blockers()
+                        if blockers or dialogue.state != "CONFIRMING":
+                            await update()
+                            await error(" ".join(blockers) or "Review the draft before saving.")
+                            continue
                         try:
-                            async with turn_lock:
-                                await dialogue.confirm(store)
+                            await dialogue.confirm(store)
                         except Exception as exc:
                             LOG.warning("Visit save failed (%s)", type(exc).__name__)
+                            await update()
                             await error("Could not save the visit. The draft is still available. Please try again.")
                         else:
                             session.revision += 1

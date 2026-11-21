@@ -113,11 +113,25 @@
                   <option value="immunisation">Immunisation</option>
                   <option value="other">Other</option>
                 </select>
+                <label for="edit-weight">Weight (kg)</label><input id="edit-weight" type="number" min="0.01" max="350" step="any">
+                <label for="edit-temperature">Temperature (°C)</label><input id="edit-temperature" type="number" min="25" max="46" step="any">
+                <label for="edit-systolic">Systolic blood pressure (mmHg)</label><input id="edit-systolic" type="number" min="30" max="300">
+                <label for="edit-diastolic">Diastolic blood pressure (mmHg)</label><input id="edit-diastolic" type="number" min="15" max="200">
+                <label for="edit-next-visit">Next visit date</label><input id="edit-next-visit" type="date">
+                <label for="edit-vaccinations">Vaccinations due (comma-separated)</label><input id="edit-vaccinations" maxlength="656">
                 <fieldset id="edit-concerns" hidden><legend>Keep these patient-reported concerns</legend><div id="edit-concern-list"></div></fieldset>
+                <label for="add-concern">Add a patient-reported concern</label><select id="add-concern"></select>
+                <label id="exclude-unclear-label" hidden><input id="exclude-unclear" type="checkbox"> Exclude the unresolved report from the structured visit</label>
+                <label for="edit-transcript">Transcript correction</label>
+                <textarea id="edit-transcript" maxlength="3000" rows="3" aria-describedby="transcript-correction-help"></textarea>
+                <p id="transcript-correction-help" class="muted">The original transcript is kept. Correct any affected measurements or concerns above.</p>
                 <button id="apply-edit" type="submit" class="secondary">Apply draft changes</button>
               </form>
             </details>
-            <div id="visit-confirm" hidden><button id="save-visit">Confirm &amp; Save</button></div>
+            <div id="visit-confirm">
+              <p id="visit-save-help" class="muted" aria-live="polite"></p>
+              <button id="save-visit" type="button" disabled>Save Visit</button>
+            </div>
           </div>
         </div>
       </section>

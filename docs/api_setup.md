@@ -48,3 +48,13 @@ Refresh the app, grant microphone access, and say a short **synthetic** visit no
 Application diagnostics record counts, event types, and HTTP status codes. Leave WebSocket wire logging disabled, since it can include credentials and payloads.
 
 On Render, deploy the GitHub commit to the existing service, keep the existing real-mode secrets and startup command, and open the direct HTTPS app URL in current Android Chrome or iPhone Safari. Allow microphone access after tapping Start voice visit. If a service worker is serving an older copy, close existing app tabs and reopen the site after deployment.
+
+## Persistent visit storage on Render
+
+The repository defaults to `DATABASE_PATH=data/visits.sqlite3` under the application checkout and does not declare a Render disk. Render service files outside a persistent disk mount are ephemeral. Verify the service's **Disks** tab and the effective `DATABASE_PATH` before relying on retained visits.
+
+For a single-instance Render service with a persistent disk, mount a disk at a path such as `/var/data`, set `DATABASE_PATH=/var/data/visits.sqlite3`, and keep the same `DATA_KEY` in Render secrets. If the old database holds visits, make a consistent SQLite backup before deploying or changing paths and restore that backup to the new disk. Verify the restored register with the existing key before accepting new visits. Keep encrypted backups separately. No database or Render settings are migrated by this application change.
+
+If the service plan cannot attach a disk or the app needs multiple instances, use managed PostgreSQL with an explicit migration that retains Fernet-encrypted visit payloads. The current code uses SQLite and does not connect to PostgreSQL.
+
+[Render persistent disks](https://render.com/docs/disks)

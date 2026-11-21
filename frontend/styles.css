@@ -81,3 +81,5 @@ input,select,textarea{width:100%;border:1px solid #aebfb5;border-radius:9px;padd
 @media(prefers-reduced-motion:no-preference){button,a{transition:background-color .12s,filter .12s}}
 #edit-visit input[type="checkbox"]{width:auto;min-height:0}
 #edit-visit button{margin-top:12px}
+#visit-confirm{margin-top:16px}
+#save-visit{width:100%;min-height:48px}

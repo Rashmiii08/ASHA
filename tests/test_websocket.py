@@ -125,7 +125,7 @@ def test_general_health_utterance_and_draft_edit(client):
         assert ws.receive_json()["type"] == "capture_paused"
         ws.send_json({
             "type": "edit_visit", "revision": result["revision"], "beneficiary_id": "DEMO-70",
-            "visit_type": "general_health", "retained_conditions": ["Diabetes"],
+            "visit_type": "general_health", "retained_conditions": ["Diabetes"], "diagnosis_answers": {"Diabetes": False},
         })
         edited = ws.receive_json()
         assert edited["state"] == "CONFIRMING"
@@ -134,3 +134,66 @@ def test_general_health_utterance_and_draft_edit(client):
         ws.send_json({"type": "confirm_visit", "revision": edited["revision"]})
         assert ws.receive_json()["state"] == "SAVED"
     assert client.get("/api/visits").json()[0]["visit_type"] == "general_health"
+
+
+def test_save_requires_fields_and_explicit_clarification(client):
+    with client.websocket_connect("/ws") as ws:
+        _, initial = start(ws)
+        ws.send_json({"type": "confirm_visit", "revision": initial["revision"]})
+        assert ws.receive_json()["type"] == "update"
+        assert ws.receive_json()["message"] == "Enter a beneficiary ID. Select a visit type."
+        update = turn(ws, "Beneficiary ID DEMO-71. General health visit. I have sugar.")
+        ws.send_json({
+            "type": "confirm_visit", "revision": update["revision"], "beneficiary_id": "DEMO-71",
+            "visit_type": "general_health", "retained_conditions": ["Diabetes"],
+        })
+        assert ws.receive_json()["review"]["pending_diagnoses"] == ["Diabetes"]
+        assert "Answer the diagnosis questions" in ws.receive_json()["message"]
+        assert client.get("/api/visits").json() == []
+
+
+def test_save_atomic_edits_database_failure_retry_and_history(client, monkeypatch):
+    import json
+    import sqlite3
+
+    register = client.app.state.register
+    insert = register.insert
+    seen = []
+
+    def fail_once(dialogue):
+        seen.append(dialogue.draft_id)
+        if len(seen) == 1:
+            raise sqlite3.OperationalError("synthetic internal database error")
+        return insert(dialogue)
+
+    monkeypatch.setattr(register, "insert", fail_once)
+    original = "Beneficiary ID DEMO-72. General health visit. Weight 60. I have fever."
+    with client.websocket_connect("/ws") as ws:
+        start(ws)
+        draft = turn(ws, original)
+        payload = {
+            "type": "confirm_visit", "revision": draft["revision"], "beneficiary_id": "DEMO-72",
+            "visit_type": "general_health", "weight_kg": 62.5, "temperature_c": 37.2,
+            "bp_systolic": 120, "bp_diastolic": 80, "retained_conditions": ["Fever"],
+            "added_conditions": ["Difficulty breathing"], "transcript_correction": "Corrected synthetic note.",
+        }
+        ws.send_json(payload)
+        reviewed = ws.receive_json()
+        assert reviewed["state"] == "CONFIRMING"
+        assert reviewed["form"]["weight_kg"] == 62.5
+        assert "draft is still available" in ws.receive_json()["message"]
+        assert client.get("/api/visits").json() == []
+        ws.send_json({"type": "confirm_visit", "revision": reviewed["revision"]})
+        assert ws.receive_json()["state"] == "SAVED"
+        ws.send_json(payload)
+        assert ws.receive_json()["state"] == "SAVED"
+    record, = client.get("/api/visits").json()
+    assert record["beneficiary_id"] == "DEMO-72" and record["bp_systolic"] == 120
+    assert [condition["term"] for condition in record["reported_conditions"]] == ["Fever", "Difficulty breathing"]
+    assert len(seen) == 2 and seen[0] == seen[1]
+    assert "transcript_correction" not in record
+    with register.connection() as db:
+        encrypted, = db.execute("SELECT payload FROM visits").fetchone()
+    stored = json.loads(register.cipher.decrypt(encrypted))
+    assert stored["transcript"] == [original]
+    assert stored["transcript_correction"] == "Corrected synthetic note."

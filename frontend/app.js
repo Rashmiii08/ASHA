@@ -11,6 +11,11 @@ const fields = {
 const visitTypeLabel = value => value === "general_health" ? "General health visit" : value;
 const language = () => $("language").value;
 let route, records = [], config, online = false;
+let reviewInfo = {};
+const measurementEditors = {
+  weight_kg: "edit-weight", temperature_c: "edit-temperature",
+  bp_systolic: "edit-systolic", bp_diastolic: "edit-diastolic",
+};
 let reviewing = false, settling = false, saving = false, turnBusy = false, settleTimer, draftRevision;
 let active = false, starting = false, socket, token, retry, attempts = 0, ready = false;
 let microphoneFrames = 0, nonzeroMicrophoneFrames = 0, droppedAudioFrames = 0;
@@ -62,8 +67,12 @@ function setPhase(value) {
   $("voice-diagnostics").hidden = config?.mode !== "real";
   $("finish-utterance").disabled = !ready || reviewing;
   $("demo-send").disabled = !ready || reviewing || value === "Processing";
-  $("visit-confirm").hidden = draftState !== "CONFIRMING" || (config?.mode === "real" && !reviewing);
-  $("save-visit").disabled = !ready || settling || saving || turnBusy;
+  const canReview = ready && draftState !== "SAVED" && (config?.mode !== "real" || reviewing);
+  $("save-visit").disabled = !canReview || settling || saving || turnBusy;
+  $("visit-save-help").textContent = draftState === "SAVED" ? "Visit saved successfully." :
+    settling || turnBusy ? "Waiting for speech processing before saving." :
+    !canReview ? "Stop recording to review and save the visit." :
+    (reviewInfo.blockers ?? []).join(" ");
   $("edit-draft").hidden = !ready || draftState === "SAVED" || (config?.mode === "real" && !reviewing);
   $("apply-edit").disabled = settling || saving || turnBusy;
 }
@@ -90,8 +99,36 @@ function renderDetails() {
     input.value = term;
     input.checked = true;
     label.append(input, " ", term);
-    return label;
+    const row = node("div");
+    row.append(label);
+    if (reviewInfo.pending_diagnoses?.includes(term)) {
+      const answer = node("select");
+      answer.dataset.diagnosis = term;
+      answer.setAttribute("aria-label", `Previous diagnosis for ${term}`);
+      for (const [value, text] of [["", "Previous diagnosis? Select an answer"],
+        ["yes", "Yes, patient reports a clinician diagnosis"], ["no", "No previous diagnosis reported"]]) {
+        const option = node("option", text);
+        option.value = value;
+        answer.append(option);
+      }
+      row.append(answer);
+    }
+    return row;
   }));
+  for (const [field, id] of Object.entries(measurementEditors)) $(id).value = draft[field] ?? "";
+  $("add-concern").replaceChildren(node("option", "No additional concern"));
+  $("add-concern").firstElementChild.value = "";
+  for (const term of reviewInfo.concern_catalog ?? []) {
+    if (concerns.some(item => item.term === term)) continue;
+    const option = node("option", term);
+    option.value = term;
+    $("add-concern").append(option);
+  }
+  $("edit-next-visit").value = draft.next_visit_date ?? "";
+  $("edit-vaccinations").value = (draft.vaccinations_due ?? []).join(", ");
+  $("edit-transcript").value = reviewInfo.transcript_correction ?? "";
+  $("exclude-unclear-label").hidden = !reviewInfo.needs_clarification;
+  $("exclude-unclear").checked = false;
   $("danger").hidden = !flagged;
   $("danger").textContent = language() === "hi"
     ? "खतरे का संकेत मिला है। कृपया मरीज़ को तुरंत प्राथमिक स्वास्थ्य केंद्र भेजें।"
@@ -236,7 +273,8 @@ function playPCM(message) {
   const source = context.createBufferSource();
   source.buffer = audio;
   source.connect(context.destination);
-  const startAt = Math.max(context.currentTime + .025, nextTime);
+  // Buffer only at the beginning or after underrun; queue subsequent PCM chunks contiguously.
+  const startAt = nextTime > context.currentTime ? nextTime : context.currentTime + .06;
   nextTime = startAt + audio.duration;
   source.start(startAt);
   sources.add(source);
@@ -331,6 +369,7 @@ function receive(message) {
       flagged = message.danger_flag;
       draftState = message.state;
       draftRevision = message.revision;
+      reviewInfo = message.review ?? {};
       turnBusy = false;
       saving = false;
       setPhase(message.state === "SAVED" ? "Saved" : settling ? "Waiting for speech processing" : reviewing ? "Review draft" :
@@ -340,8 +379,8 @@ function receive(message) {
       if (draftState === "SAVED") {
         stop(true);
         setPhase("Saved");
-        notice("Visit saved. You can find it in Visit history.");
-        refreshRecords().catch(() => notice("Visit saved. Reconnect to refresh history."));
+        notice("Visit saved successfully. You can find it in Visit history.");
+        refreshRecords().catch(() => notice("Visit saved successfully. Reconnect to refresh history."));
       }
       break;
     case "capture_paused":
@@ -676,24 +715,40 @@ $("sample").onclick = () => {
     : "Beneficiary ID DEMO-4821, newborn, weight 2.8 kg, temperature 37.6. Vaccines due BCG, OPV-0. Next visit 2026-11-25.";
   $("demo-text").focus();
 };
-$("edit-visit").onsubmit = event => {
-  event.preventDefault();
+function submitReview(type) {
   if (!ready || settling || saving || turnBusy) return;
+  if (!$("edit-visit").checkValidity()) {
+    $("edit-draft").open = true;
+    $("edit-visit").reportValidity();
+    return;
+  }
+  const retained = [...$("edit-concern-list").querySelectorAll("input:checked")].map(input => input.value);
+  const diagnosisAnswers = Object.fromEntries([...$("edit-concern-list").querySelectorAll("select[data-diagnosis]")]
+    .filter(select => retained.includes(select.dataset.diagnosis) && select.value)
+    .map(select => [select.dataset.diagnosis, select.value === "yes"]));
   saving = true;
   setPhase(phase);
   transmit({
-    type: "edit_visit", revision: draftRevision,
+    type, revision: draftRevision,
     beneficiary_id: $("edit-beneficiary").value.trim() || null,
     visit_type: $("edit-visit-type").value || null,
-    retained_conditions: [...$("edit-concern-list").querySelectorAll("input:checked")].map(input => input.value),
+    ...Object.fromEntries(Object.entries(measurementEditors).map(([field, id]) =>
+      [field, $(id).value === "" ? null : Number($(id).value)])),
+    next_visit_date: $("edit-next-visit").value || null,
+    vaccinations_due: $("edit-vaccinations").value.split(",").map(value => value.trim()).filter(Boolean),
+    transcript_correction: $("edit-transcript").value || null,
+    retained_conditions: retained,
+    added_conditions: $("add-concern").value ? [$("add-concern").value] : [],
+    diagnosis_answers: diagnosisAnswers,
+    exclude_unclear_report: $("exclude-unclear").checked,
   });
+}
+
+$("edit-visit").onsubmit = event => {
+  event.preventDefault();
+  submitReview("edit_visit");
 };
-$("save-visit").onclick = () => {
-  if (!ready || draftState !== "CONFIRMING" || saving || settling || turnBusy) return;
-  saving = true;
-  setPhase(phase);
-  transmit({type: "confirm_visit", revision: draftRevision});
-};
+$("save-visit").onclick = () => submitReview("confirm_visit");
 $("delete-data").onclick = async () => {
   if (!confirm("Delete every confirmed synthetic visit from this register and discard this browser’s current draft?")) return;
   try {

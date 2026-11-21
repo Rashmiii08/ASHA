@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from .danger import OTHER_SUBJECT, assess, newborn_clauses
 from .phrases import PHRASES
 from .schemas import Extraction, Visit, VisitReview
-from .terminology import CAREGIVER, DIAGNOSIS_QUESTIONS, PATIENT_SPEAKER, reported_terms
+from .terminology import CAREGIVER, DIAGNOSIS_QUESTIONS, PATIENT_SPEAKER, TERMS, reported_terms
 
 CONFIRM = {
     "save", "save it", "yes save it", "yes save", "confirm",
@@ -92,22 +92,50 @@ class Dialogue:
     needs_clarification: bool = False
     caregiver_speaking: bool = False
     awaiting_other_concerns: bool = False
+    transcript_correction: str | None = None
+
+    def pending_diagnoses(self):
+        return [term for term in [self.pending_condition, *self.remaining_questions] if term is not None]
+
+    def save_blockers(self):
+        blockers = []
+        if not self.visit.beneficiary_id:
+            blockers.append("Enter a beneficiary ID.")
+        if not self.visit.visit_type:
+            blockers.append("Select a visit type.")
+        if self.pending_diagnoses():
+            blockers.append("Answer the diagnosis questions or remove the incorrect concerns.")
+        if self.needs_clarification:
+            blockers.append("Clarify the uncertain report or explicitly exclude it from this visit.")
+        return blockers
 
     def apply_review(self, review: VisitReview):
         selected = set(review.retained_conditions)
-        if not selected <= self.conditions.keys():
-            raise ValueError("Unknown reported condition")
-        self.visit = Visit.model_validate({
-            **self.visit.model_dump(), "beneficiary_id": review.beneficiary_id, "visit_type": review.visit_type,
-        })
+        pending = self.pending_diagnoses()
+        if (not selected <= self.conditions.keys() or not set(review.added_conditions) <= TERMS.keys()
+                or not review.diagnosis_answers.keys() <= selected.intersection(pending)):
+            raise ValueError("Unknown reported concern or clarification")
+        changes = review.model_dump(include=set(Visit.model_fields), exclude_unset=True)
+        self.visit = Visit.model_validate({**self.visit.model_dump(), **changes})
         self.conditions = {term: source for term, source in self.conditions.items() if term in selected}
-        # Retained unanswered reports stay patient-reported; reviewing cannot attest to a diagnosis.
-        self.pending_condition = None
-        self.remaining_questions.clear()
-        self.needs_clarification = False
+        for term in review.added_conditions:
+            self.conditions.setdefault(term, "patient_reported")
+        for term, diagnosed in review.diagnosis_answers.items():
+            if diagnosed:
+                self.conditions[term] = "patient_reported_previous_diagnosis"
+        unanswered = [term for term in pending if term in selected and term not in review.diagnosis_answers]
+        self.pending_condition = unanswered[0] if unanswered else None
+        self.remaining_questions = unanswered[1:]
+        if review.exclude_unclear_report:
+            self.needs_clarification = False
+        if "transcript_correction" in review.model_fields_set:
+            self.transcript_correction = (review.transcript_correction or "").strip() or None
         self.awaiting_other_concerns = False
-        self.danger = assess(self.visit, "\n".join(self.notes), [])
-        self.state = "CONFIRMING" if self.visit.beneficiary_id and self.visit.visit_type else "LISTENING"
+        original = "\n".join(self.notes)
+        self.danger = assess(self.visit, original, [])
+        if self.transcript_correction:
+            self.danger |= assess(self.visit, self.transcript_correction, [])
+        self.state = "LISTENING" if self.save_blockers() else "CONFIRMING"
 
     def diagnosis_question(self):
         return f"You mentioned {self.pending_condition}. Has a healthcare professional previously diagnosed this condition?"
@@ -118,7 +146,7 @@ class Dialogue:
     async def confirm(self, store):
         if self.state == "SAVED":
             return self.phrases["saved"]
-        if self.state != "CONFIRMING" or self.pending_condition or self.needs_clarification:
+        if self.state != "CONFIRMING" or self.save_blockers():
             return self.phrases["missing"] if not (self.visit.beneficiary_id and self.visit.visit_type) else self.phrases["unclear"]
         await store(self)
         self.state = "SAVED"
