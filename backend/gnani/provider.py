@@ -45,10 +45,10 @@ class GnaniTransport:
 
     def prisma(self, language="en"):
         return self._open("Prisma", PRISMA_URL, "x-api-key-id", {
-            "language_code": _locale(language),
+            "lang_code": _locale(language),
             "model": "prisma-v3.0",
             "x-sample-rate": "16000",
-            "format": "transcribe",
+            "x-format": "transcribe",
             "x-vad-threshold": VAD_THRESHOLD,
             "x-min-silence-ms": MIN_SILENCE_MS,
         })
