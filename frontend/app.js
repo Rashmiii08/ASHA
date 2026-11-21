@@ -12,6 +12,7 @@ const language = () => $("language").value;
 let route, records = [], config, online = false;
 let active = false, starting = false, socket, token, retry, attempts = 0, ready = false;
 let microphoneFrames = 0, nonzeroMicrophoneFrames = 0, droppedAudioFrames = 0;
+let finalDisplayed = false, displayedFinalSequence = 0, serverFinalSequence = 0;
 let voiceConnection = "Idle", serverAudioChunks, prismaDiagnostics;
 let phase = "Ready", draft = {}, flagged = false, draftState, heartbeat, lastReply;
 let context, stream, microphone, worklet, mutedOutput, captureTimer, nextTime = 0, generation = -1, sources = new Set();
@@ -258,6 +259,9 @@ function renderVoiceDiagnostics() {
     status = "Prisma detected speech. Waiting for a transcript.";
   }
   else if (ready && (prisma?.partials || prisma?.finals)) status = "Prisma has returned transcript text.";
+  $("voice-transcript-delivery").textContent = serverFinalSequence > displayedFinalSequence
+    ? "Waiting for the latest final to reach this browser"
+    : finalDisplayed ? "Nonempty final text displayed" : "No final text displayed";
   $("voice-diagnostic-status").textContent = status;
   $("voice-mic-frames").textContent = `${microphoneFrames} captured · ${nonzeroMicrophoneFrames} with signal · ${droppedAudioFrames} dropped`;
   $("voice-prisma-frames").textContent = prisma
@@ -273,10 +277,18 @@ function clearPartialTranscript() {
   $("partial-transcript").hidden = true;
 }
 
+function resetTranscript() {
+  $("transcript").textContent = "Your words will appear here.";
+  clearPartialTranscript();
+  finalDisplayed = false;
+  displayedFinalSequence = serverFinalSequence = 0;
+}
+
 function receive(message) {
   switch (message.type) {
     case "ready":
       clearTimeout(heartbeat);
+      if (!message.resumed) resetTranscript();
       token = message.session;
       ready = true;
       voiceConnection = "Connected to Prisma";
@@ -289,6 +301,7 @@ function receive(message) {
       attempts = 0;
       serverAudioChunks = message.audio_chunks;
       prismaDiagnostics = message.prisma;
+      serverFinalSequence = message.final_sequence ?? 0;
       renderVoiceDiagnostics();
       break;
     case "update":
@@ -321,11 +334,18 @@ function receive(message) {
       break;
     }
     case "transcript":
+      if (typeof message.text !== "string" || !message.text.trim()) break;
       if (message.final) {
         if ($("notice").textContent === $("prisma-issue").textContent) notice("");
         setPrismaIssue();
         $("transcript").textContent = message.text;
         clearPartialTranscript();
+        finalDisplayed = true;
+        if (Number.isSafeInteger(message.sequence) && message.sequence > 0) {
+          displayedFinalSequence = message.sequence;
+          transmit({type: "transcript_displayed", sequence: message.sequence});
+        }
+        renderVoiceDiagnostics();
       } else {
         $("partial-transcript").textContent = `Partial · ${message.text}`;
         $("partial-transcript").hidden = false;
@@ -529,7 +549,6 @@ function stop(preserveDraft = false) {
     draft = {};
     flagged = false;
     draftState = null;
-    $("transcript").textContent = "Your words will appear here.";
     $("assistant").textContent = "Start a session to begin.";
   }
   rememberDraft();
@@ -576,6 +595,8 @@ $("delete-data").onclick = async () => {
   try {
     await request("/api/visits", {method: "DELETE", headers: {"X-Confirm-Delete": "synthetic-visits"}});
     stop();
+    resetTranscript();
+    renderVoiceDiagnostics();
     records = [];
     renderRecords();
     notice("Synthetic visits and this browser’s draft were cleared.");

@@ -43,6 +43,9 @@ class Session:
     dialogue: Dialogue
     touched: float = field(default_factory=time.monotonic)
     connected: bool = False
+    last_final: str | None = None
+    final_sequence: int = 0
+    displayed_final_sequence: int = 0
 
 
 def same_origin(scope):
@@ -250,10 +253,17 @@ def create_live_app():
                         await error("This voice provider does not support manual utterance completion.")
                     else:
                         await finish()
+                elif kind == "transcript_displayed" and stream:
+                    sequence = message.get("sequence")
+                    if type(sequence) is int and session.displayed_final_sequence < sequence <= session.final_sequence:
+                        session.displayed_final_sequence = sequence
+                        LOG.info("Browser acknowledged a nonempty final transcript")
                 elif kind == "heartbeat":
                     response = {"type": "heartbeat"}
                     if stream:
                         response["audio_chunks"] = audio_chunks
+                        response["final_sequence"] = session.final_sequence
+                        response["displayed_final_sequence"] = session.displayed_final_sequence
                         if isinstance(stream, PrismaStream):
                             response["prisma"] = stream.diagnostics()
                     await send(response)
@@ -287,7 +297,14 @@ def create_live_app():
             async for text, final in events:
                 if not isinstance(text, str) or not text.strip():
                     continue
-                await send({"type": "transcript", "text": text[:3000], "final": final})
+                text = text.strip()
+                payload = {"type": "transcript", "text": text[:3000], "final": final}
+                if final:
+                    # Retain the newest final before attempting a write that can race disconnect.
+                    session.last_final = payload["text"]
+                    session.final_sequence += 1
+                    payload["sequence"] = session.final_sequence
+                await send(payload)
                 if len(text) > 3000:
                     if final:
                         await error("The transcript is too long to process. Please speak a shorter note.")
@@ -331,6 +348,9 @@ def create_live_app():
             await send({"type": "ready", "session": token, "mode": mode, "resumed": existing is not None})
             announced = True
             await update()
+            if existing and session.last_final is not None:
+                await send({"type": "transcript", "text": session.last_final, "final": True,
+                            "sequence": session.final_sequence})
 
         pending = asyncio.Queue(maxsize=8 if mode == "real" else 1)
         try:

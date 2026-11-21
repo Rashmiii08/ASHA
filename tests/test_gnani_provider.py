@@ -26,8 +26,8 @@ def test_uses_confirmed_url_and_header(monkeypatch, service, url, header):
         assert additional_headers[header] == "synthetic-test-key"
         if service == "prisma":
             assert additional_headers == {
-                header: "synthetic-test-key", "language_code": "en-IN", "model": "prisma-v3.0",
-                "x-sample-rate": "16000", "format": "transcribe",
+                header: "synthetic-test-key", "lang_code": "en-IN", "model": "prisma-v3.0",
+                "x-sample-rate": "16000", "x-format": "transcribe",
                 "x-vad-threshold": "0.5", "x-min-silence-ms": "700",
             }
         else:
@@ -129,7 +129,7 @@ def test_prisma_acknowledgement_binary_frames_and_final_transcript(monkeypatch, 
 
     @asynccontextmanager
     async def connect(url, *, additional_headers, **kwargs):
-        assert additional_headers["language_code"] == "hi-IN"
+        assert additional_headers["lang_code"] == "hi-IN"
         yield socket
 
     monkeypatch.setattr(provider, "connect", connect)

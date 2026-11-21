@@ -78,7 +78,7 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
      return output.stream;
    }});
  });
- let voiceFrames = 0, finishRequests = 0;
+ let voiceFrames = 0, finishRequests = 0, displayedSequence = 0;
  await capture.routeWebSocket('**/ws', ws => {
    ws.onMessage(raw => {
      const message = JSON.parse(raw);
@@ -93,6 +93,7 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
          }
        }
      }
+     if (message.type === 'transcript_displayed') displayedSequence = message.sequence;
      if (message.type === 'heartbeat') {
        ws.send(JSON.stringify({type:'heartbeat', audio_chunks:voiceFrames, prisma:{
          frames:voiceFrames, nonzero_frames:voiceFrames, peak_dbfs:-12,
@@ -104,7 +105,7 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
        if (++finishRequests === 1) {
          ws.send(JSON.stringify({type:'prisma_notice', code:'utterance_error', message:'private upstream response'}));
        } else {
-         ws.send(JSON.stringify({type:'transcript', text:'Synthetic microphone test', final:true}));
+         ws.send(JSON.stringify({type:'transcript', text:'Synthetic microphone test', final:true, sequence:1}));
        }
      }
    });
@@ -128,6 +129,12 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
  await capturePage.locator('#partial-transcript').waitFor({state:'hidden'});
  await capturePage.locator('#prisma-issue').waitFor({state:'hidden'});
  await capturePage.getByRole('button',{name:'Stop session'}).click();
+ assert.equal(displayedSequence, 1);
+ await capturePage.locator('#transcript').getByText('Synthetic microphone test').waitFor();
+ await capturePage.locator('#voice-transcript-delivery').getByText('Nonempty final text displayed').waitFor();
+ assert.ok(!(await capturePage.locator('#voice-diagnostics').innerText()).includes('Synthetic microphone test'));
+ await capturePage.getByRole('button',{name:'Start voice visit'}).click();
+ await capturePage.locator('#transcript').getByText('Your words will appear here.').waitFor();
  await capture.close();
  console.log('Browser smoke passed: keyboard entry, mobile width, Hindi, danger, correction, offline draft, reconnect, confirm, history, follow-up, simulated permission denial, synthetic microphone PCM over WebSocket.');
  } finally { await browser.close(); }

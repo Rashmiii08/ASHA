@@ -212,7 +212,9 @@ def test_fastapi_prisma_audio_transcript_and_diagnostics(tmp_path, monkeypatch):
     with TestClient(live.create_live_app()) as client:
         with client.websocket_connect("/ws") as socket:
             socket.send_json({"type": "hello"})
-            assert [socket.receive_json()["type"] for _ in range(4)] == ["ready", "update", "assistant", "audio"]
+            ready = socket.receive_json()
+            assert ready["type"] == "ready"
+            assert [socket.receive_json()["type"] for _ in range(3)] == ["update", "assistant", "audio"]
             socket.send_json({"type": "audio", "data": base64.b64encode(pcm).decode()})
             assert socket.receive_json() == {"type": "transcript", "text": partial, "final": False}
             assert socket.receive_json() == {"type": "prisma_notice", "code": "utterance_error"}
@@ -225,7 +227,29 @@ def test_fastapi_prisma_audio_transcript_and_diagnostics(tmp_path, monkeypatch):
             assert "private upstream response" not in json.dumps(heartbeat)
             assert partial not in json.dumps(heartbeat)
             socket.send_json({"type": "finish_utterance"})
-            assert socket.receive_json() == {"type": "transcript", "text": final, "final": True}
+            final_message = {"type": "transcript", "text": final, "final": True, "sequence": 1}
+            assert socket.receive_json() == final_message
             assert socket.receive_json()["state"] == "PROCESSING"
             assert socket.receive_json()["state"] == "CONFIRMING"
+            assert not client.get("/api/visits").json()
+            assert socket.receive_json()["type"] == "assistant"
+            assert socket.receive_json()["type"] == "audio"
+            socket.send_json({"type": "heartbeat"})
+            status = socket.receive_json()
+            assert status["final_sequence"] == 1 and status["displayed_final_sequence"] == 0
+            assert final not in json.dumps(status)
+        with client.websocket_connect("/ws") as resumed:
+            resumed.send_json({"type": "hello", "session": ready["session"]})
+            assert resumed.receive_json()["resumed"]
+            assert resumed.receive_json()["type"] == "update"
+            assert resumed.receive_json() == final_message
+            resumed.send_json({"type": "transcript_displayed", "sequence": 99})
+            resumed.send_json({"type": "heartbeat"})
+            assert resumed.receive_json()["displayed_final_sequence"] == 0
+            resumed.send_json({"type": "transcript_displayed", "sequence": 1})
+            resumed.send_json({"type": "heartbeat"})
+            status = resumed.receive_json()
+            assert status["type"] == "heartbeat"
+            assert status["final_sequence"] == status["displayed_final_sequence"] == 1
+            assert final not in json.dumps(status)
             assert not client.get("/api/visits").json()
