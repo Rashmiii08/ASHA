@@ -150,11 +150,20 @@ class PrismaStream:
             self._silent_frames = self._max_rms = self._peak = 0
 
     async def finish_utterance(self) -> None:
+        """Complete a spoken turn using PCM silence, as required by Prisma VAD.
+
+        Prisma's documented realtime protocol accepts binary PCM frames and
+        detects speech endings from silence. It does not document a JSON
+        `commit` message. Send enough paced silence for the configured VAD
+        window instead of an unsupported control message.
+        """
         if self._buffer:
             await self.send_pcm(bytes(FRAME_BYTES - len(self._buffer)))
-        await self._socket.send(json.dumps({"type": "commit"}))
+        # 32 frames = 1024 ms at 16 kHz, exceeding the 700 ms VAD silence window.
+        for _ in range(32):
+            await self.send_pcm(bytes(FRAME_BYTES))
         self._commits += 1
-        LOG.info("Prisma utterance commit sent")
+        LOG.info("Prisma utterance ended with paced silence frames")
 
     def diagnostics(self) -> dict:
         return {
