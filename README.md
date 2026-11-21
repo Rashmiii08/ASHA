@@ -1,6 +1,6 @@
 # Voice Field Register
 
-Voice Field Register helps ASHA workers turn home-visit notes into a structured register, check predefined referral rules, review corrections and manage follow-ups. Use synthetic records exclusively. The checkout implements a working synthetic transcript demo. Live Gnani voice requires the official Gnani WebSocket protocol and a provider implementation.
+Voice Field Register helps ASHA workers turn home-visit notes into a structured register, check predefined referral rules, review corrections and manage follow-ups. Use synthetic records exclusively. The default mode runs a synthetic transcript demo. The bundled Prisma and Timbre provider requires account credentials and outbound access for live voice. Live connectivity remains to be verified with a configured account.
 
 The app uses Python 3.12, FastAPI, WebSockets, Pydantic, Google Gen AI, SQLite, Fernet and a vanilla JavaScript PWA with Web Audio. See the [architecture and WebSocket contract](docs/architecture.md).
 

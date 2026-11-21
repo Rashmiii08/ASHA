@@ -70,7 +70,7 @@ def create_live_app():
             try:
                 app.state.voice = load_voice()
             except Exception:
-                app.state.voice_error = "Gnani setup is incomplete. Check the API key and verified protocol module."
+                app.state.voice_error = "Gnani setup is incomplete. Check GNANI_API_KEY and any provider override."
         try:
             yield
         finally:
@@ -153,12 +153,18 @@ def create_live_app():
                 first = True
                 try:
                     async with asyncio.timeout(45):
-                        async for chunk in app.state.voice.speak(text, dialogue.language):
-                            if not chunk or current_generation != generation:
-                                continue
-                            await send({"type": "audio", "data": base64.b64encode(chunk).decode(),
-                                        "is_first_chunk": first, "generation": current_generation})
-                            first = False
+                        stream = app.state.voice.speak(text, dialogue.language)
+                        try:
+                            async for chunk in stream:
+                                if not chunk or current_generation != generation:
+                                    continue
+                                await send({"type": "audio", "data": base64.b64encode(chunk).decode(),
+                                            "is_first_chunk": first, "generation": current_generation})
+                                first = False
+                        finally:
+                            close = getattr(stream, "aclose", None)
+                            if close is not None:
+                                await close()
                     await send({"type": "audio_end", "generation": current_generation})
                 except (WebSocketDisconnect, asyncio.CancelledError):
                     raise

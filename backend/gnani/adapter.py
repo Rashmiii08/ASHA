@@ -19,9 +19,9 @@ class Voice(Protocol):
 
 def load_voice() -> Voice:
     key = os.getenv("GNANI_API_KEY")
-    module = os.getenv("GNANI_PROTOCOL_MODULE")
-    if not key or not module:
-        raise ValueError("Real mode requires a Gnani API key and a verified Gnani protocol module.")
+    module = os.getenv("GNANI_PROTOCOL_MODULE") or "backend.gnani.provider"
+    if not key:
+        raise ValueError("Real mode requires GNANI_API_KEY.")
     factory = importlib.import_module(module).create_voice
     voice = factory(key)
     if not callable(getattr(voice, "listen", None)) or not callable(getattr(voice, "speak", None)):
