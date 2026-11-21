@@ -6,7 +6,7 @@ import json
 import logging
 import math
 import struct
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -171,7 +171,7 @@ class PrismaStream:
             "commits": self._commits,
         }
 
-    async def transcripts(self) -> AsyncIterator[tuple[str, bool]]:
+    async def transcripts(self, notice: Callable[[str], Awaitable[None]] | None = None) -> AsyncIterator[tuple[str, bool]]:
         async for raw in self._socket:
             message = _json_message(raw, "Prisma")
             kind = message.get("type")
@@ -180,6 +180,8 @@ class PrismaStream:
             if kind in ("speech_start", "processing", "error"):
                 # A provider error for one utterance can leave the stream open.
                 self._events[kind] += 1
+                if notice and kind == "error":
+                    await notice("utterance_error")
                 continue
             if kind != "transcript":
                 self._events["other"] += 1
@@ -189,11 +191,15 @@ class PrismaStream:
             if not isinstance(payload, str) or not isinstance(final, bool):
                 self._events["error"] += 1
                 LOG.warning("Prisma sent a malformed transcript event")
+                if notice:
+                    await notice("invalid_transcript")
                 continue
             if not payload.strip():
                 if final:
                     self._events["empty"] += 1
                     LOG.info("Prisma final transcript was empty")
+                    if notice:
+                        await notice("empty_transcript")
                 continue
             self._events["final" if final else "partial"] += 1
             yield payload, final
@@ -205,6 +211,8 @@ class GnaniVoice(GnaniTransport):
         async with self.prisma(language) as socket:
             raw = await asyncio.wait_for(socket.recv(), timeout=10)
             message = _json_message(raw, "Prisma")
+            if message.get("type") == "error":
+                raise GnaniProtocolError("Prisma rejected audio stream initialization.")
             if message.get("type") != "connected":
                 raise GnaniProtocolError("Gnani Prisma did not acknowledge the stream.")
             config = message.get("config")

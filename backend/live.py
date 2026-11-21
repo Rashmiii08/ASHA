@@ -22,7 +22,7 @@ from starlette.websockets import WebSocketState
 from .db import Register, delete_visits, demo_key
 from .dialogue import Dialogue
 from .gnani.adapter import load_voice
-from .gnani.provider import GnaniUpgradeError, PrismaStream
+from .gnani.provider import GnaniProtocolError, GnaniUpgradeError, PrismaStream
 from .llm import configured_gemini
 from .schemas import Language
 
@@ -279,11 +279,19 @@ def create_live_app():
                 else:
                     await error("Unsupported message type.")
 
+        async def prisma_notice(code):
+            await send({"type": "prisma_notice", "code": code})
+
         async def transcripts(stream):
-            async for text, final in stream.transcripts():
-                if not isinstance(text, str) or not 1 <= len(text.strip()) <= 3000:
+            events = stream.transcripts(prisma_notice) if isinstance(stream, PrismaStream) else stream.transcripts()
+            async for text, final in events:
+                if not isinstance(text, str) or not text.strip():
                     continue
-                await send({"type": "transcript", "text": text, "final": final})
+                await send({"type": "transcript", "text": text[:3000], "final": final})
+                if len(text) > 3000:
+                    if final:
+                        await error("The transcript is too long to process. Please speak a shorter note.")
+                    continue
                 if final:
                     if pending.full():
                         await error("Wait for the current turn to finish.")
@@ -370,6 +378,10 @@ def create_live_app():
             browser_gone = True
         except GnaniUpgradeError as exc:
             await error(f"Prisma connection rejected (HTTP {exc.status}).", fatal=exc.status in (401, 403))
+        except GnaniProtocolError:
+            message = ("Prisma returned an unreadable response. Reconnecting."
+                       if announced else "Prisma did not accept the audio stream setup. Reconnecting.")
+            await error(message)
         except (ValueError, asyncio.TimeoutError):
             await error("The session could not be started.", fatal=True)
         except Exception as exc:

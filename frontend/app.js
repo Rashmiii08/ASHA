@@ -230,6 +230,17 @@ function playPCM(message) {
   setPhase("Speaking");
 }
 
+const prismaNotices = {
+  utterance_error: "Prisma couldn’t transcribe that speech segment. Try a shorter note, then pause.",
+  invalid_transcript: "Prisma returned an unreadable transcript. Try speaking again.",
+  empty_transcript: "Prisma returned an empty transcript. Check your microphone level and try again.",
+};
+
+function setPrismaIssue(message = "") {
+  $("prisma-issue").textContent = message;
+  $("prisma-issue").hidden = !message;
+}
+
 function renderVoiceDiagnostics() {
   const prisma = prismaDiagnostics;
   let status = voiceConnection;
@@ -239,9 +250,14 @@ function renderVoiceDiagnostics() {
   else if (ready && prisma?.frames && !prisma.nonzero_frames) {
     status = "Only silent frames have been sent to Prisma. Check microphone input and permissions.";
   }
-  else if (ready && prisma?.nonzero_frames && !prisma.speech_starts && !prisma.processing && !prisma.finals) {
+  else if (ready && serverAudioChunks > 0 && prisma?.frames === 0) status = "Server received audio. Waiting for a full frame to be sent to Prisma.";
+  else if (ready && prisma?.nonzero_frames && !prisma.speech_starts && !prisma.processing && !prisma.finals && !prisma.partials) {
     status = "Audio was sent to Prisma. No speech event has arrived. Speak and pause, or tap Finish speaking.";
   }
+  else if (ready && (prisma?.speech_starts || prisma?.processing) && !prisma.finals && !prisma.partials) {
+    status = "Prisma detected speech. Waiting for a transcript.";
+  }
+  else if (ready && (prisma?.partials || prisma?.finals)) status = "Prisma has returned transcript text.";
   $("voice-diagnostic-status").textContent = status;
   $("voice-mic-frames").textContent = `${microphoneFrames} captured · ${nonzeroMicrophoneFrames} with signal · ${droppedAudioFrames} dropped`;
   $("voice-prisma-frames").textContent = prisma
@@ -295,8 +311,19 @@ function receive(message) {
       $("assistant").lang = language();
       $("assistant").textContent = message.text;
       break;
+    case "prisma_notice": {
+      const text = Object.prototype.hasOwnProperty.call(prismaNotices, message.code) ? prismaNotices[message.code] : "";
+      if (text) {
+        setPrismaIssue(text);
+        notice(text);
+        clearPartialTranscript();
+      }
+      break;
+    }
     case "transcript":
       if (message.final) {
+        if ($("notice").textContent === $("prisma-issue").textContent) notice("");
+        setPrismaIssue();
         $("transcript").textContent = message.text;
         clearPartialTranscript();
       } else {
@@ -343,7 +370,8 @@ function connect() {
   generation = -1;
   setPhase(attempts ? "Reconnecting" : "Connecting");
   lastReply = performance.now();
-  heartbeat = setTimeout(() => current.close(), 15000);
+  // Allow both the upstream upgrade and the Prisma ready acknowledgement.
+  heartbeat = setTimeout(() => current.close(), 25000);
   current.onopen = () => current.send(JSON.stringify({type: "hello", language: language(), session: token || null}));
   current.onmessage = event => {
     if (socket !== current) return;
@@ -408,6 +436,7 @@ function capture({pcm, rms}) {
 async function start() {
   if (active || starting || !online || config?.voice_error) return;
   notice("");
+  setPrismaIssue();
   microphoneFrames = nonzeroMicrophoneFrames = droppedAudioFrames = 0;
   serverAudioChunks = prismaDiagnostics = undefined;
   voiceConnection = "Opening microphone and Prisma connection…";

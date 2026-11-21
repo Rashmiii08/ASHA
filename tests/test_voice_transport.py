@@ -186,6 +186,7 @@ def test_fastapi_prisma_audio_transcript_and_diagnostics(tmp_path, monkeypatch):
                 assert message == pcm
                 await self.events.put({"type": "speech_start"})
                 await self.events.put({"type": "transcript", "text": partial, "is_final": False})
+                await self.events.put({"type": "error", "message": "private upstream response"})
             else:
                 assert json.loads(message) == {"type": "commit"}
                 await self.events.put({"type": "processing"})
@@ -214,11 +215,14 @@ def test_fastapi_prisma_audio_transcript_and_diagnostics(tmp_path, monkeypatch):
             assert [socket.receive_json()["type"] for _ in range(4)] == ["ready", "update", "assistant", "audio"]
             socket.send_json({"type": "audio", "data": base64.b64encode(pcm).decode()})
             assert socket.receive_json() == {"type": "transcript", "text": partial, "final": False}
+            assert socket.receive_json() == {"type": "prisma_notice", "code": "utterance_error"}
             socket.send_json({"type": "heartbeat"})
             heartbeat = socket.receive_json()
             assert heartbeat["audio_chunks"] == 1
             assert heartbeat["prisma"]["nonzero_frames"] == 1
             assert heartbeat["prisma"]["partials"] == 1
+            assert heartbeat["prisma"]["errors"] == 1
+            assert "private upstream response" not in json.dumps(heartbeat)
             assert partial not in json.dumps(heartbeat)
             socket.send_json({"type": "finish_utterance"})
             assert socket.receive_json() == {"type": "transcript", "text": final, "final": True}
