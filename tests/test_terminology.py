@@ -26,3 +26,13 @@ def test_unrelated_or_negated_sugar_does_not_imply_diabetes(text):
 
 def test_ambiguous_reference_requires_clarification():
     assert reported_terms("Sugar?") == ([], True)
+
+
+def test_patient_statement_with_coordinated_concerns():
+    text = "This was a general health visit. The patient has sugar and high BP."
+    assert reported_terms(text) == (["Diabetes", "Hypertension"], False)
+    assert reported_terms("The patient has sugar and the caregiver has high BP.") == (["Diabetes"], False)
+    assert reported_terms("I am the patient. I have high BP.") == (["Hypertension"], False)
+    assert reported_terms("I am the caregiver. I have high BP.") == ([], True)
+    assert reported_terms("She has sugar.") == ([], True)
+    assert reported_terms("The patient does not have sugar or high BP.") == ([], False)

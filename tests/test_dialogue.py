@@ -82,3 +82,28 @@ def test_scopes_maternal_temperature_to_mother():
         assert not dialogue.danger
 
     asyncio.run(exercise())
+
+
+def test_general_health_classification_and_caregiver_context_with_model():
+    from backend.schemas import Extraction, Visit
+
+    async def extract(_text, _visit):
+        return Extraction(intent="provide_info", patch=Visit(visit_type="other"))
+
+    async def exercise():
+        dialogue = Dialogue("en")
+        text = "This was a general health visit. The patient has sugar and high BP."
+        await dialogue.process(text, extract, None)
+        assert dialogue.notes == [text]
+        assert dialogue.visit.visit_type == "general_health"
+        assert list(dialogue.conditions) == ["Diabetes", "Hypertension"]
+
+        dialogue = Dialogue("en")
+        await dialogue.process("I am the caregiver.", None, None)
+        reply = await dialogue.process("I have high BP.", None, None)
+        assert "clarify" in reply.lower()
+        assert not dialogue.conditions
+        await dialogue.process("The patient has sugar.", None, None)
+        assert list(dialogue.conditions) == ["Diabetes"]
+
+    asyncio.run(exercise())

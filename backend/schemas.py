@@ -6,7 +6,7 @@ from typing_extensions import Annotated
 
 
 Language = Literal["en", "hi"]
-VisitType = Literal["antenatal", "postnatal", "newborn", "immunisation", "other"]
+VisitType = Literal["antenatal", "postnatal", "newborn", "immunisation", "general_health", "other"]
 DangerSign = Literal["unable_to_feed", "convulsions", "newborn_high_temperature", "newborn_low_temperature"]
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
 Vaccine = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]
@@ -31,3 +31,13 @@ class Extraction(BaseModel):
     intent: Literal["provide_info", "correct", "confirm", "clarify"]
     patch: Visit
     danger_candidates: list[DangerSign] = Field(default_factory=list)
+
+
+class VisitReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["edit_visit"]
+    revision: int = Field(strict=True, ge=0)
+    beneficiary_id: Identifier | None
+    visit_type: VisitType | None
+    retained_conditions: list[str] = Field(max_length=16)

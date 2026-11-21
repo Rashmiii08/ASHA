@@ -93,6 +93,30 @@
             <div class="section-header"><h2>Visit details</h2><span id="draft-label" class="muted">Draft</span></div>
             <div id="danger" role="alert" hidden></div>
             <dl id="details"></dl>
+            <section aria-labelledby="reported-heading">
+              <h3 id="reported-heading">Reported Health Concerns</h3>
+              <p id="reported-empty" class="muted">No concerns recorded.</p>
+              <ul id="reported-conditions" hidden></ul>
+            </section>
+            <details id="edit-draft" hidden>
+              <summary>Edit visit details</summary>
+              <form id="edit-visit">
+                <label for="edit-beneficiary">Beneficiary ID</label>
+                <input id="edit-beneficiary" maxlength="80">
+                <label for="edit-visit-type">Visit type</label>
+                <select id="edit-visit-type">
+                  <option value="">Select a visit type</option>
+                  <option value="general_health">General health visit</option>
+                  <option value="antenatal">Antenatal</option>
+                  <option value="postnatal">Postnatal</option>
+                  <option value="newborn">Newborn</option>
+                  <option value="immunisation">Immunisation</option>
+                  <option value="other">Other</option>
+                </select>
+                <fieldset id="edit-concerns" hidden><legend>Keep these patient-reported concerns</legend><div id="edit-concern-list"></div></fieldset>
+                <button id="apply-edit" type="submit" class="secondary">Apply draft changes</button>
+              </form>
+            </details>
             <div id="visit-confirm" hidden><button id="save-visit">Confirm &amp; Save</button></div>
           </div>
         </div>

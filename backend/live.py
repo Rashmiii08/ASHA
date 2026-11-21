@@ -24,7 +24,7 @@ from .dialogue import Dialogue
 from .gnani.adapter import load_voice
 from .gnani.provider import GnaniProtocolError, GnaniUpgradeError, PrismaStream
 from .llm import configured_gemini
-from .schemas import Language
+from .schemas import Language, VisitReview
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG = logging.getLogger(__name__)
@@ -268,6 +268,19 @@ def create_live_app():
                     if finish is not None:
                         await finish()
                     await send({"type": "capture_paused"})
+                elif kind == "edit_visit":
+                    if dialogue.state == "SAVED" or (mode == "real" and not capture_paused):
+                        await error("Stop recording before editing an unsaved visit.")
+                    elif processing_turn or final_delivery_pending or not pending.empty() or message.get("revision") != session.revision:
+                        await error("The draft is still updating. Review the latest details before editing.")
+                    else:
+                        try:
+                            dialogue.apply_review(VisitReview.model_validate(message))
+                        except ValueError:
+                            await error("The draft changes are invalid. Check the beneficiary ID, visit type, and concerns.")
+                        else:
+                            session.revision += 1
+                            await update()
                 elif kind == "confirm_visit":
                     if dialogue.state == "SAVED":
                         await update()
@@ -275,7 +288,7 @@ def create_live_app():
                         await error("Stop microphone recording before confirming the visit.")
                     elif processing_turn or final_delivery_pending or not pending.empty() or message.get("revision") != session.revision:
                         await error("The draft is still updating. Review the latest details and confirm again.")
-                    elif dialogue.state != "CONFIRMING" or dialogue.pending_condition:
+                    elif dialogue.state != "CONFIRMING" or dialogue.pending_condition or dialogue.needs_clarification:
                         await error("Complete the required details and answer any pending clarification before saving.")
                     else:
                         try:

@@ -105,3 +105,32 @@ def test_pause_preserves_draft_and_explicit_confirmation_is_idempotent(client):
             ws.send_json({"type": "confirm_visit", "revision": restored["revision"]})
             assert ws.receive_json()["state"] == "SAVED"
     assert len(client.get("/api/visits").json()) == 1
+
+
+def test_general_health_utterance_and_draft_edit(client):
+    text = "This was a general health visit. The patient has sugar and high BP."
+    with client.websocket_connect("/ws") as ws:
+        start(ws)
+        ws.send_json({"type": "demo_transcript", "text": text})
+        assert ws.receive_json()["text"] == text
+        assert ws.receive_json()["state"] == "PROCESSING"
+        result = ws.receive_json()
+        assert result["form"]["visit_type"] == "general_health"
+        assert result["form"]["reported_conditions"] == [
+            {"term": "Diabetes", "source": "patient_reported"},
+            {"term": "Hypertension", "source": "patient_reported"},
+        ]
+        assert "Diabetes" in ws.receive_json()["text"]
+        ws.send_json({"type": "pause_capture"})
+        assert ws.receive_json()["type"] == "capture_paused"
+        ws.send_json({
+            "type": "edit_visit", "revision": result["revision"], "beneficiary_id": "DEMO-70",
+            "visit_type": "general_health", "retained_conditions": ["Diabetes"],
+        })
+        edited = ws.receive_json()
+        assert edited["state"] == "CONFIRMING"
+        assert edited["form"]["reported_conditions"] == [{"term": "Diabetes", "source": "patient_reported"}]
+        assert not client.get("/api/visits").json()
+        ws.send_json({"type": "confirm_visit", "revision": edited["revision"]})
+        assert ws.receive_json()["state"] == "SAVED"
+    assert client.get("/api/visits").json()[0]["visit_type"] == "general_health"

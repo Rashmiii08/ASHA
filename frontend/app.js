@@ -8,6 +8,7 @@ const fields = {
   temperature_c: "Temperature (°C)", bp_systolic: "Systolic (mmHg)", bp_diastolic: "Diastolic (mmHg)",
   vaccinations_due: "Vaccinations due", next_visit_date: "Next visit",
 };
+const visitTypeLabel = value => value === "general_health" ? "General health visit" : value;
 const language = () => $("language").value;
 let route, records = [], config, online = false;
 let reviewing = false, settling = false, saving = false, turnBusy = false, settleTimer, draftRevision;
@@ -63,22 +64,34 @@ function setPhase(value) {
   $("demo-send").disabled = !ready || reviewing || value === "Processing";
   $("visit-confirm").hidden = draftState !== "CONFIRMING" || (config?.mode === "real" && !reviewing);
   $("save-visit").disabled = !ready || settling || saving || turnBusy;
+  $("edit-draft").hidden = !ready || draftState === "SAVED" || (config?.mode === "real" && !reviewing);
+  $("apply-edit").disabled = settling || saving || turnBusy;
 }
 
 function renderDetails() {
   $("details").replaceChildren(...Object.entries(fields).map(([key, label]) => {
     const row = node("div");
-    const val = draft[key];
+    const val = key === "visit_type" ? visitTypeLabel(draft[key]) : draft[key];
     row.append(node("dt", label), node("dd", Array.isArray(val) ? val.join(", ") || "None" : val ?? "—"));
     return row;
   }));
-  if (draft.reported_conditions?.length) {
-    const row = node("div");
-    const values = draft.reported_conditions.map(({term, source}) =>
-      `${term} (${source === "patient_reported_previous_diagnosis" ? "patient-reported previous diagnosis" : "patient-reported"})`);
-    row.append(node("dt", "Reported health concerns"), node("dd", values.join(", ")));
-    $("details").append(row);
-  }
+  const concerns = draft.reported_conditions ?? [];
+  $("reported-empty").hidden = concerns.length > 0;
+  $("reported-conditions").hidden = concerns.length === 0;
+  $("reported-conditions").replaceChildren(...concerns.map(({term, source}) => node("li",
+    `${term} (${source === "patient_reported_previous_diagnosis" ? "patient-reported previous diagnosis" : "patient-reported"})`)));
+  $("edit-beneficiary").value = draft.beneficiary_id ?? "";
+  $("edit-visit-type").value = draft.visit_type ?? "";
+  $("edit-concerns").hidden = concerns.length === 0;
+  $("edit-concern-list").replaceChildren(...concerns.map(({term}) => {
+    const label = node("label");
+    const input = node("input");
+    input.type = "checkbox";
+    input.value = term;
+    input.checked = true;
+    label.append(input, " ", term);
+    return label;
+  }));
   $("danger").hidden = !flagged;
   $("danger").textContent = language() === "hi"
     ? "खतरे का संकेत मिला है। कृपया मरीज़ को तुरंत प्राथमिक स्वास्थ्य केंद्र भेजें।"
@@ -96,7 +109,7 @@ function list(target, data, empty, followup = false) {
   for (const item of data) {
     const row = node("article", undefined, "record");
     const name = node("div");
-    name.append(node("strong", item.beneficiary_id), node("small", item.visit_type));
+    name.append(node("strong", item.beneficiary_id), node("small", visitTypeLabel(item.visit_type)));
     const date = node("div");
     date.append(node("strong", followup ? item.next_visit_date : localDate(new Date(item.created_at))));
     if (item.danger_flag) date.append(node("small", "Referral flagged", "flag"));
@@ -131,7 +144,7 @@ function renderRecords() {
   const query = $("search").value.trim().toLowerCase();
   const empty = online ? "No confirmed visits yet." : "Connect to load confirmed visits.";
   list($("recent"), records.slice(0, 4), empty);
-  list($("records"), records.filter(r => `${r.beneficiary_id} ${r.visit_type}`.toLowerCase().includes(query)),
+  list($("records"), records.filter(r => `${r.beneficiary_id} ${visitTypeLabel(r.visit_type)}`.toLowerCase().includes(query)),
     query ? "No visits match your search." : empty);
   list($("followup-list"), followups, online ? "No follow-ups scheduled." : "Connect to load follow-ups.", true);
   const stats = {
@@ -662,6 +675,18 @@ $("sample").onclick = () => {
     ? "लाभार्थी आईडी DEMO-4821, नवजात, वजन 2.8, तापमान 37.6, बाकी टीके BCG, OPV-0. अगली विज़िट 2026-11-25."
     : "Beneficiary ID DEMO-4821, newborn, weight 2.8 kg, temperature 37.6. Vaccines due BCG, OPV-0. Next visit 2026-11-25.";
   $("demo-text").focus();
+};
+$("edit-visit").onsubmit = event => {
+  event.preventDefault();
+  if (!ready || settling || saving || turnBusy) return;
+  saving = true;
+  setPhase(phase);
+  transmit({
+    type: "edit_visit", revision: draftRevision,
+    beneficiary_id: $("edit-beneficiary").value.trim() || null,
+    visit_type: $("edit-visit-type").value || null,
+    retained_conditions: [...$("edit-concern-list").querySelectorAll("input:checked")].map(input => input.value),
+  });
 };
 $("save-visit").onclick = () => {
   if (!ready || draftState !== "CONFIRMING" || saving || settling || turnBusy) return;

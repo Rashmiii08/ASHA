@@ -7,13 +7,16 @@ from pydantic import ValidationError
 
 from .danger import OTHER_SUBJECT, assess, newborn_clauses
 from .phrases import PHRASES
-from .schemas import Extraction, Visit
-from .terminology import DIAGNOSIS_QUESTIONS, reported_terms
+from .schemas import Extraction, Visit, VisitReview
+from .terminology import CAREGIVER, DIAGNOSIS_QUESTIONS, PATIENT_SPEAKER, reported_terms
 
 CONFIRM = {
     "yes", "save", "save it", "yes save it", "yes save", "confirm", "हाँ", "हां",
     "हाँ सेव करें", "हां सेव करें", "सेव करें",
 }
+
+
+GENERAL_HEALTH = re.compile(r"\bgeneral health visit\b", re.I)
 
 
 def deterministic(text: str) -> Extraction:
@@ -27,6 +30,7 @@ def deterministic(text: str) -> Extraction:
         "postnatal": r"\bpostnatal\b|प्रसव के बाद",
         "newborn": r"\bnewborn\b|नवजात",
         "immunisation": r"\bimmuni[sz]ation\b|टीकाकरण",
+        "general_health": GENERAL_HEALTH,
         "other": r"\bother visit\b|अन्य विज़िट",
     }
     for category, pattern in categories.items():
@@ -64,6 +68,27 @@ class Dialogue:
     danger: set[str] = field(default_factory=set)
     conditions: dict[str, str] = field(default_factory=dict)
     pending_condition: str | None = None
+    remaining_questions: list[str] = field(default_factory=list)
+    needs_clarification: bool = False
+    caregiver_speaking: bool = False
+
+    def apply_review(self, review: VisitReview):
+        selected = set(review.retained_conditions)
+        if not selected <= self.conditions.keys():
+            raise ValueError("Unknown reported condition")
+        self.visit = Visit.model_validate({
+            **self.visit.model_dump(), "beneficiary_id": review.beneficiary_id, "visit_type": review.visit_type,
+        })
+        self.conditions = {term: source for term, source in self.conditions.items() if term in selected}
+        # Retained unanswered reports stay patient-reported; reviewing cannot attest to a diagnosis.
+        self.pending_condition = None
+        self.remaining_questions.clear()
+        self.needs_clarification = False
+        self.danger = assess(self.visit, "\n".join(self.notes), [])
+        self.state = "CONFIRMING" if self.visit.beneficiary_id and self.visit.visit_type else "LISTENING"
+
+    def diagnosis_question(self):
+        return f"You mentioned {self.pending_condition}. Has a healthcare professional previously diagnosed this condition?"
 
     def condition_details(self):
         return [{"term": term, "source": source} for term, source in self.conditions.items()]
@@ -71,7 +96,7 @@ class Dialogue:
     async def confirm(self, store):
         if self.state == "SAVED":
             return self.phrases["saved"]
-        if self.state != "CONFIRMING" or self.pending_condition:
+        if self.state != "CONFIRMING" or self.pending_condition or self.needs_clarification:
             return self.phrases["missing"] if not (self.visit.beneficiary_id and self.visit.visit_type) else self.phrases["unclear"]
         await store(self)
         self.state = "SAVED"
@@ -85,14 +110,16 @@ class Dialogue:
         if self.state == "SAVED":
             return self.phrases["saved"]
         command = re.sub(r"[^\w\s\u0900-\u097f]", "", text.casefold()).strip()
-        if self.pending_condition and command in {"yes", "no", "हाँ", "हां", "नहीं", "नही"}:
+        if self.pending_condition and not self.needs_clarification and command in {"yes", "no", "हाँ", "हां", "नहीं", "नही"}:
             self.notes.append(text)
             if command in {"yes", "हाँ", "हां"}:
                 self.conditions[self.pending_condition] = "patient_reported_previous_diagnosis"
                 reply = "I’ll record that as a patient-reported previous diagnosis."
             else:
                 reply = "I’ll record it as patient-reported."
-            self.pending_condition = None
+            self.pending_condition = self.remaining_questions.pop(0) if self.remaining_questions else None
+            if self.pending_condition:
+                return " ".join(filter(None, (self.phrases["danger"] if self.danger else "", reply, self.diagnosis_question())))
             self.state = "CONFIRMING" if self.visit.beneficiary_id and self.visit.visit_type else "LISTENING"
             followup = self.phrases["missing"] if self.state == "LISTENING" else "Do you have any other health concerns?"
             return " ".join(filter(None, (self.phrases["danger"] if self.danger else "", reply, followup)))
@@ -102,13 +129,26 @@ class Dialogue:
             return "Review the visit and select Confirm & Save when ready."
 
         self.notes.append(text)
-        reported, ambiguous = reported_terms(text)
+        if CAREGIVER.search(text):
+            self.caregiver_speaking = True
+        elif PATIENT_SPEAKER.search(text):
+            self.caregiver_speaking = False
+        reported, ambiguous = reported_terms(
+            text, first_person_patient=(
+                not self.caregiver_speaking and self.visit.visit_type != "newborn"
+                and not re.search(r"\bnewborn\b", text, re.I)
+            ),
+        )
+        if ambiguous or reported:
+            self.needs_clarification = ambiguous
         new_terms = [term for term in reported if term not in self.conditions]
         for term in new_terms:
             self.conditions[term] = "patient_reported"
         try:
             result = await extract(text, self.visit) if extract else deterministic(text)
             patch = result.patch.model_dump(exclude_unset=True, exclude_none=True)
+            if GENERAL_HEALTH.search(text) and patch.get("visit_type") in (None, "other", "general_health"):
+                patch["visit_type"] = "general_health"
             if patch.get("visit_type", self.visit.visit_type) == "newborn" and "temperature_c" in patch:
                 if OTHER_SUBJECT.search(text.lower()):
                     scoped = deterministic("; ".join(newborn_clauses(text))).patch.temperature_c
@@ -128,16 +168,15 @@ class Dialogue:
         signs = assess(self.visit, "\n".join(self.notes), result.danger_candidates)
         alert = self.phrases["danger"] if signs else ""
         self.danger = signs
-        for term in new_terms:
-            if term in DIAGNOSIS_QUESTIONS and self.pending_condition is None:
-                self.pending_condition = term
+        self.remaining_questions.extend(term for term in new_terms if term in DIAGNOSIS_QUESTIONS)
+        if self.pending_condition is None and self.remaining_questions:
+            self.pending_condition = self.remaining_questions.pop(0)
+        if self.needs_clarification:
+            self.state = "LISTENING"
+            return " ".join(filter(None, (alert, "Can you clarify which concern applies to the patient and what you mean?")))
         if self.pending_condition:
             self.state = "LISTENING"
-            question = f"You mentioned {self.pending_condition}. Has a healthcare professional previously diagnosed this condition?"
-            return " ".join(filter(None, (alert, question)))
-        if ambiguous:
-            self.state = "LISTENING"
-            return " ".join(filter(None, (alert, "Can you clarify what you mean and whether a healthcare professional diagnosed a condition?")))
+            return " ".join(filter(None, (alert, self.diagnosis_question())))
         if not self.visit.beneficiary_id or not self.visit.visit_type:
             return " ".join(filter(None, (alert, self.phrases["missing"])))
         if not patch and not reported and not assess(self.visit, text, result.danger_candidates).difference(
@@ -148,7 +187,7 @@ class Dialogue:
         self.state = "CONFIRMING"
         fields = self.visit.model_dump(mode="json", exclude_none=True)
         fields["beneficiary_id"] = " ".join(fields["beneficiary_id"])
-        fields["visit_type"] = self.phrases["types"].get(fields["visit_type"], fields["visit_type"])
+        fields["visit_type"] = self.phrases["types"].get(fields["visit_type"], fields["visit_type"].replace("_", " "))
         spoken = []
         for name, label in zip(Visit.model_fields, self.phrases["fields"]):
             if name in fields:
