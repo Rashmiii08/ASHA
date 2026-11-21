@@ -1,10 +1,15 @@
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
-const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
+const {signIn} = require('./browser_auth_support.cjs');
+const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'https://localhost:8766';
 (async () => {
- const browser = await chromium.launch({executablePath: process.env.CHROMIUM_EXECUTABLE});
+ const browser = await chromium.launch({executablePath: process.env.CHROMIUM_EXECUTABLE, args: ["--ignore-certificate-errors"]});
  try {
- const context = await browser.newContext({ viewport: {width:1440,height:900}});
+ const context = await browser.newContext({ignoreHTTPSErrors:true, viewport: {width:1440,height:900}});
+ await signIn(context, baseURL);
+ await context.addInitScript(() => {
+   navigator.geolocation.getCurrentPosition = (_success, error) => error({code:1});
+ });
  const page = await context.newPage();
  const pageErrors=[];
  page.on('pageerror', error=>pageErrors.push(error.message));
@@ -18,15 +23,16 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
  await page.getByRole('button',{name:'Use sample'}).click();
  await page.getByRole('button',{name:'Send transcript'}).click();
  await page.getByRole('alert').getByText(/Danger sign detected/).waitFor();
- await page.evaluate(()=>navigator.serviceWorker.ready);
+ await page.waitForFunction(async () => Boolean((await navigator.serviceWorker.getRegistration())?.active), undefined, {timeout:15000});
  await context.setOffline(true);
  await page.reload();
- await page.getByText('Offline · voice needs a connection').waitFor();
- await page.getByRole('alert').getByText(/Danger sign detected/).waitFor();
+ await page.locator('#account').getByRole('heading',{name:'Sign in'}).waitFor();
+ assert.equal(await page.getByRole('alert').count(),0);
  await context.setOffline(false);
  await page.waitForFunction(() => document.querySelector('#network').textContent.trim() === 'Connected', undefined, {timeout:20000});
  await page.getByRole('button',{name:'Start voice visit'}).click();
  await page.locator('#phase').getByText('Review and confirm').waitFor();
+ await page.getByRole('alert').getByText(/Danger sign detected/).waitFor();
  await page.locator('#demo-text').fill('No, temperature is 36.9.');
  await page.getByRole('button',{name:'Send transcript'}).click();
  await page.locator('#details').getByText('36.9').waitFor();
@@ -90,7 +96,8 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
  assert.equal(await page.evaluate(()=>document.body.scrollWidth),360);
  assert.deepEqual(pageErrors,[]);
  await context.close();
- const denied = await browser.newContext();
+ const denied = await browser.newContext({ignoreHTTPSErrors:true});
+ await signIn(denied, baseURL);
  await denied.addInitScript(()=> {
    navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Test denial', 'NotAllowedError'); };
  });
@@ -100,7 +107,8 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
  await deniedPage.getByRole('button',{name:'Start voice visit'}).click();
  await deniedPage.getByText(/Microphone permission was denied/).waitFor();
  await denied.close();
- const capture = await browser.newContext({serviceWorkers: 'block', isMobile: true, hasTouch: true, viewport:{width:390,height:844}});
+ const capture = await browser.newContext({ignoreHTTPSErrors:true, serviceWorkers: 'block', isMobile: true, hasTouch: true, viewport:{width:390,height:844}});
+ await signIn(capture, baseURL);
  await capture.route('**/api/status', route=>route.fulfill({json:{mode:'real',voice_ready:true,voice_error:null}}));
  await capture.addInitScript(() => {
    Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {value: async () => {

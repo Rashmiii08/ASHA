@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from threading import Event
 
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
+from tests.support import TestClient
 
 from backend import live
 

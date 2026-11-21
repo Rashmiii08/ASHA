@@ -10,6 +10,7 @@ const fields = {
 };
 const visitTypeLabel = value => value === "general_health" ? "General health visit" : value;
 const language = () => $("language").value;
+let currentUser = null, accountPage = "login", resetCodeTimer, lastAccountCheck = 0;
 let route, records = [], config, online = false;
 let reviewInfo = {};
 const measurementEditors = {
@@ -47,13 +48,17 @@ function localDate(date = new Date()) {
 
 function navigate() {
   const hash = location.hash.slice(1);
-  route = Object.prototype.hasOwnProperty.call(routes, hash) ? hash : (localStorage.getItem("field-language") ? "dashboard" : "welcome");
-  for (const name of Object.keys(routes)) $(name).hidden = name !== route;
+  const worker = currentUser?.role === "worker";
+  route = !currentUser ? "account" : !worker ? "administration" :
+    Object.prototype.hasOwnProperty.call(routes, hash) ? hash : (localStorage.getItem("field-language") ? "dashboard" : "welcome");
+  for (const name of [...Object.keys(routes), "account", "administration"]) $(name).hidden = name !== route;
+  $("worker-navigation").hidden = !worker;
+  $("logout").hidden = !currentUser;
   for (const link of document.querySelectorAll("[data-route]")) {
     if (link.dataset.route === route) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
-  $("page-label").textContent = routes[route];
+  $("page-label").textContent = routes[route] ?? (currentUser ? "Administration" : "ASHA accounts");
   renderRecords();
 }
 
@@ -330,11 +335,14 @@ function renderRecords() {
   list($("recent"), records.slice(0, 4), empty);
   list($("records"), records.filter(r => `${r.beneficiary_id} ${visitTypeLabel(r.visit_type)}`.toLowerCase().includes(query)),
     query ? "No visits match your search." : empty);
+  list($("dashboard-followups"), followups.filter(item => !item.scheduled.completed).slice(0, 4),
+    online ? "No pending follow-ups." : "Connect to load follow-ups.", true);
   list($("followup-list"), followups, online ? "No follow-ups scheduled." : "Connect to load follow-ups.", true);
   const stats = {
     "Today's visits": records.filter(r => localDate(new Date(r.created_at)) === localDate()).length,
     "Completed records": records.length,
     "Pending follow-ups": followups.filter(r => !r.scheduled.completed).length,
+    "Pending vaccinations": followups.filter(r => r.scheduled.kind === "vaccination" && !r.scheduled.completed).length,
     "Flagged visits": records.filter(r => r.danger_flag).length,
   };
   $("stats").replaceChildren(...Object.entries(stats).map(([label, value]) => {
@@ -349,7 +357,15 @@ async function request(url, options = {}) {
   const timer = setTimeout(() => controller.abort(), 5000);
   try {
     const response = await fetch(url, {...options, cache: "no-store", signal: controller.signal});
-    if (!response.ok) throw new Error("Request failed");
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const error = new Error(typeof body.detail === "string" ? body.detail : "Request failed.");
+      error.status = response.status;
+      if (response.status === 401 && (currentUser || url === "/api/auth/me")) {
+        sessionEnded("Your session expired. Sign in again to recover your draft.");
+      }
+      throw error;
+    }
     return await response.json();
   } finally {
     clearTimeout(timer);
@@ -357,14 +373,22 @@ async function request(url, options = {}) {
 }
 
 async function refreshRecords() {
-  records = await request("/api/visits");
+  const worker = currentUser?.id;
+  const fetched = await request("/api/visits");
+  if (currentUser?.id !== worker) return;
+  records = fetched;
   renderRecords();
 }
 
 async function checkConnection() {
+  if (currentUser?.role !== "worker") return;
+  const worker = currentUser.id;
   try {
-    config = await request("/api/status");
+    const status = await request("/api/status");
+    if (currentUser?.id !== worker) return;
+    config = status;
     online = true;
+    $("delete-data").hidden = config.mode !== "demo";
     $("mode").hidden = config.mode !== "demo";
     $("mode").textContent = "Synthetic demo";
     $("demo-form").hidden = config.mode !== "demo";
@@ -381,13 +405,166 @@ async function checkConnection() {
   renderRecords();
 }
 
-// Store only the synthetic structured draft and the short-lived session token.
+// The draft ID is not an authentication credential. The backend also checks its owner.
+function draftStorageKey() {
+  return currentUser?.role === "worker" ? `field-draft-${currentUser.id}` : null;
+}
+
 function rememberDraft() {
-  const pending = token && draftState !== "SAVED" ? {token, draft, flagged, language: language(), at: Date.now()} : null;
+  const key = draftStorageKey();
+  if (!key) return;
+  const pending = token && draftState !== "SAVED" ? {token, language: language(), at: Date.now()} : null;
   try {
-    if (pending) sessionStorage.setItem("field-draft", JSON.stringify(pending));
-    else sessionStorage.removeItem("field-draft");
+    if (pending) sessionStorage.setItem(key, JSON.stringify(pending));
+    else sessionStorage.removeItem(key);
   } catch { /* Storage may be unavailable in a private browser session. */ }
+}
+
+function restoreDraft() {
+  const key = draftStorageKey();
+  if (!key) return;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(key));
+    if (saved && Date.now() - saved.at < 30 * 60 * 1000) {
+      token = saved.token;
+      $("language").value = $("welcome-language").value = saved.language;
+      notice("An unfinished draft is available. Start the voice visit to recover it.");
+    } else {
+      sessionStorage.removeItem(key);
+    }
+  } catch { /* A fresh session is still available. */ }
+}
+
+function sessionEnded(message) {
+  rememberDraft();
+  notice("");
+  currentUser = null;
+  online = false;
+  config = null;
+  stop();
+  resetTranscript();
+  reviewInfo = {};
+  records = [];
+  renderDetails();
+  $("worker-welcome").textContent = "Welcome, ASHA worker";
+  $("worker-assignment").textContent = "";
+  $("admin-workers").replaceChildren();
+  $("admin-visits").replaceChildren();
+  clearResetCode();
+  showAccountPage("login");
+  $("account-message").textContent = message;
+  navigate();
+}
+
+function setUser(user) {
+  currentUser = user;
+  if (user.role === "worker") {
+    $("worker-welcome").textContent = `Welcome, ${user.full_name}`;
+    $("worker-assignment").textContent = `Worker ID ${user.worker_id} · ${user.village}`;
+    restoreDraft();
+    void checkConnection();
+  } else {
+    void loadAdministration();
+  }
+  navigate();
+}
+
+function showAccountPage(page) {
+  accountPage = page;
+  $("account-form").reset();
+  $("account-message").textContent = "";
+  const labels = {login: "Sign in", register: "Register as a worker", forgot: "Request password reset", reset: "Set new password"};
+  $("account-title").textContent = labels[page];
+  $("account-submit").textContent = labels[page];
+  $("registration-fields").hidden = page !== "register";
+  $("worker-id-field").hidden = page === "reset";
+  $("reset-code-field").hidden = page !== "reset";
+  $("password-field").hidden = page === "forgot";
+  $("confirm-password-field").hidden = !["register", "reset"].includes(page);
+  $("account-password").autocomplete = page === "login" ? "current-password" : "new-password";
+}
+
+function clearResetCode() {
+  clearTimeout(resetCodeTimer);
+  $("admin-reset-code").textContent = "";
+  $("admin-reset-code").hidden = true;
+}
+
+async function loadAdministration() {
+  const administrator = currentUser?.id;
+  clearResetCode();
+  try {
+    const [workers, visits] = await Promise.all([request("/api/auth/workers"), request("/api/auth/legacy-visits")]);
+    if (currentUser?.id !== administrator) return;
+    $("admin-workers").replaceChildren(...workers.map(worker => {
+      const row = node("div", undefined, "account-row");
+      row.append(node("strong", `${worker.full_name} · ${worker.worker_id}`),
+        node("p", `${worker.phone} · ${worker.village} · ${worker.status}`));
+      if (worker.role === "worker") {
+        const village = node("input");
+        village.setAttribute("aria-label", `Area for ${worker.worker_id}`);
+        village.value = worker.village;
+        const status = node("select");
+        status.setAttribute("aria-label", `Status for ${worker.worker_id}`);
+        for (const text of ["pending", "active", "inactive"]) {
+          const option = node("option", text);
+          option.value = text;
+          status.append(option);
+        }
+        status.value = worker.status;
+        const apply = node("button", "Save worker assignment", "secondary");
+        apply.onclick = () => adminAction(`/api/auth/workers/${worker.id}`, "PATCH", {village: village.value, status: status.value});
+        row.append(village, status, apply);
+      }
+      if (worker.reset_requested) {
+        const issue = node("button", "Issue reset code", "secondary");
+        issue.onclick = async () => {
+          if (!confirm("Have you independently verified this worker’s identity? Share the code only with that worker.")) return;
+          try {
+            const result = await request(`/api/auth/workers/${worker.id}/reset-code`, {method: "POST"});
+            if (currentUser?.id !== administrator) return;
+            $("admin-reset-code").textContent = `One-time code for ${worker.worker_id}: ${result.code}`;
+            $("admin-reset-code").hidden = false;
+            resetCodeTimer = setTimeout(clearResetCode, 60000);
+            issue.disabled = true;
+          } catch (error) { notice(error.message); }
+        };
+        row.append(issue);
+      }
+      return row;
+    }));
+    const activeWorkers = workers.filter(worker => worker.role === "worker" && worker.status === "active");
+    $("admin-visits").replaceChildren(...visits.map(visit => {
+      const row = node("div", undefined, "account-row");
+      row.append(node("p", `${visit.id} · ${visit.created_at}`));
+      const choices = node("select");
+      choices.setAttribute("aria-label", `Assign worker for ${visit.id}`);
+      const placeholder = node("option", "Select a worker");
+      placeholder.value = "";
+      choices.append(placeholder);
+      for (const worker of activeWorkers) {
+        const option = node("option", `${worker.worker_id} · ${worker.village}`);
+        option.value = worker.id;
+        choices.append(option);
+      }
+      const assign = node("button", "Assign legacy visit", "secondary");
+      assign.onclick = () => {
+        if (choices.value && confirm("Assign this visit to the selected worker?")) {
+          void adminAction(`/api/auth/legacy-visits/${encodeURIComponent(visit.id)}/assign`, "POST", {worker: Number(choices.value)});
+        }
+      };
+      row.append(choices, assign);
+      return row;
+    }));
+  } catch (error) { notice(error.message); }
+}
+
+async function adminAction(url, method, values) {
+  try {
+    const result = await request(url, {method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(values)});
+    notice(result.message);
+    await loadAdministration();
+  } catch (error) { notice(error.message); }
 }
 
 function clearPlayback() {
@@ -493,6 +670,9 @@ function resetTranscript() {
 
 function receive(message) {
   switch (message.type) {
+    case "auth_expired":
+      sessionEnded("Your session expired. Sign in again to recover your draft.");
+      break;
     case "ready":
       clearTimeout(heartbeat);
       if (!message.resumed) resetTranscript();
@@ -622,7 +802,7 @@ function scheduleReconnect() {
 }
 
 function connect() {
-  if (!active || socket) return;
+  if (currentUser?.role !== "worker" || !active || socket) return;
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const current = new WebSocket(`${protocol}//${location.host}/ws`);
   socket = current;
@@ -694,7 +874,7 @@ function capture({pcm, rms}) {
 }
 
 async function start() {
-  if ((active && !reviewing) || starting || settling || saving || !online || config?.voice_error) return;
+  if (currentUser?.role !== "worker" || (active && !reviewing) || starting || settling || saving || !online || config?.voice_error) return;
   notice("");
   setPrismaIssue();
   microphoneFrames = nonzeroMicrophoneFrames = droppedAudioFrames = 0;
@@ -967,26 +1147,75 @@ $("delete-data").onclick = async () => {
   } catch { notice("Could not delete visits. Check the connection and try again."); }
 };
 window.addEventListener("hashchange", navigate);
-window.addEventListener("online", checkConnection);
+window.addEventListener("online", () => {
+  if (currentUser) void checkConnection();
+  else void loadSession();
+});
 window.addEventListener("offline", checkConnection);
 setInterval(() => {
+  if (currentUser && currentUser.expires_at * 1000 <= Date.now()) {
+    sessionEnded("Your session expired. Sign in again to recover your draft.");
+    return;
+  }
+  if (currentUser && Date.now() - lastAccountCheck > 60000) {
+    lastAccountCheck = Date.now();
+    void request("/api/auth/me").catch(() => {});
+  }
   if (ready && performance.now() - lastReply > 18000) socket?.close();
   else transmit({type: "heartbeat"});
   if (!online) void checkConnection();
 }, 6000);
 
 $("language").value = $("welcome-language").value = localStorage.getItem("field-language") || "en";
-try {
-  const saved = JSON.parse(sessionStorage.getItem("field-draft"));
-  if (saved && Date.now() - saved.at < 30 * 60 * 1000 && saved.language === language()) {
-    ({token, draft, flagged} = saved);
-    notice("A draft is available. Start the voice session to reconnect.");
-  } else {
-    sessionStorage.removeItem("field-draft");
+try { sessionStorage.removeItem("field-draft"); } catch { /* Older drafts may have been stored by the demo. */ }
+for (const button of document.querySelectorAll("[data-account-page]")) {
+  button.onclick = () => showAccountPage(button.dataset.accountPage);
+}
+$("account-form").onsubmit = async event => {
+  event.preventDefault();
+  const page = accountPage;
+  const values = {};
+  if (page !== "reset") values.worker_id = $("account-id").value.trim();
+  if (page !== "forgot") values.password = $("account-password").value;
+  if (page === "register" || page === "reset") values.confirm_password = $("account-confirm").value;
+  if (page === "reset") values.code = $("account-code").value.trim();
+  if (page === "register") {
+    values.full_name = $("account-name").value;
+    values.phone = $("account-phone").value.trim();
+    values.village = $("account-village").value;
   }
-} catch { /* A fresh session is still available. */ }
+  $("account-submit").disabled = true;
+  try {
+    const result = await request(`/api/auth/${page}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(values)});
+    if (result.user) setUser(result.user);
+    else {
+      if (page === "reset") showAccountPage("login");
+      $("account-message").textContent = result.message;
+    }
+  } catch (error) {
+    $("account-message").textContent = error.message;
+  } finally {
+    $("account-password").value = $("account-confirm").value = $("account-code").value = "";
+    $("account-submit").disabled = false;
+  }
+};
+$("logout").onclick = async () => {
+  try {
+    await request("/api/auth/logout", {method: "POST"});
+    sessionEnded("Signed out.");
+  } catch (error) { notice(error.message); }
+};
 navigate();
 renderDetails();
 draw();
-void checkConnection();
+async function loadSession() {
+  try {
+    const {user} = await request("/api/auth/me");
+    if (!currentUser) setUser(user);
+  } catch (error) {
+    if (!currentUser) $("account-message").textContent = error.status === 401
+      ? "Sign in with your approved worker account." : "Connect over HTTPS to verify your account.";
+  }
+}
+void loadSession();
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

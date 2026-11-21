@@ -1,7 +1,7 @@
 import base64
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.support import TestClient
 
 from backend.live import create_live_app
 
@@ -160,11 +160,11 @@ def test_save_atomic_edits_database_failure_retry_and_history(client, monkeypatc
     insert = register.insert
     seen = []
 
-    def fail_once(dialogue):
+    def fail_once(dialogue, *, owner_id):
         seen.append(dialogue.draft_id)
         if len(seen) == 1:
             raise sqlite3.OperationalError("synthetic internal database error")
-        return insert(dialogue)
+        return insert(dialogue, owner_id=owner_id)
 
     monkeypatch.setattr(register, "insert", fail_once)
     original = "Beneficiary ID 0072. General health visit. Weight 60. I have fever."
@@ -219,10 +219,10 @@ def test_location_draft_recovery_save_and_secure_history(client):
     point = {"latitude": 12.345678, "longitude": 76.54321, "accuracy_m": 8.5,
              "captured_at": "2026-11-22T09:00:00Z"}
     capture = {"type": "set_visit_location", "request_id": 1, "location": point}
-    with client.websocket_connect("/ws") as ws:
-        start(ws)
-        ws.send_json(capture)
-        assert ws.receive_json() == {"type": "location_error", "message": "Location capture requires HTTPS."}
+    from starlette.websockets import WebSocketDisconnect
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("ws://testserver/ws"):
+            pass
 
     with client.websocket_connect("wss://testserver/ws") as ws:
         token, _ = start(ws)
@@ -239,7 +239,7 @@ def test_location_draft_recovery_save_and_secure_history(client):
         assert ws.receive_json()["state"] == "SAVED"
         ws.send_json({**capture, "location": {**point, "latitude": 14}})
         assert ws.receive_json()["message"] == "This visit has already been saved."
-    assert "location" not in client.get("/api/visits").json()[0]
+    assert client.get("http://testserver/api/visits").status_code == 403
     secure_history = client.get("https://testserver/api/visits")
     assert secure_history.headers["Cache-Control"] == "no-store"
     assert secure_history.json()[0]["location"] == point

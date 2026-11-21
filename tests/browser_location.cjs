@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const {signIn} = require("./browser_auth_support.cjs");
 const {chromium} = require(process.env.PLAYWRIGHT_MODULE || "playwright");
 const url = process.env.FIELD_REGISTER_GPS_URL || "https://localhost:8767";
 const tile = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j9L8AAAAASUVORK5CYII=", "base64");
@@ -28,6 +29,7 @@ async function save(page) {
       ignoreHTTPSErrors: true, permissions: ["geolocation"],
       geolocation: {latitude: 12.345678, longitude: 76.54321, accuracy: 12},
     });
+    await signIn(context, url);
     let tileRequests = 0;
     await context.route("https://tile.openstreetmap.org/**", route => {
       tileRequests += 1;
@@ -53,7 +55,7 @@ async function save(page) {
     await page.locator(".leaflet-marker-icon").waitFor();
     await page.getByRole("button", {name: "Zoom in"}).click();
     assert.ok(tileRequests > 0);
-    assert.ok(!(await page.evaluate(() => sessionStorage.getItem("field-draft"))).includes("12.345678"));
+    assert.ok(!(await page.evaluate(() => JSON.stringify(Object.values(sessionStorage)))).includes("12.345678"));
     await context.setGeolocation({latitude: 13.234567, longitude: 77.54321, accuracy: 9});
     await page.getByRole("button", {name: "Refresh Location"}).click();
     await page.locator("#location-latitude").getByText("13.234567").waitFor();
@@ -79,6 +81,7 @@ async function save(page) {
       [3, /GPS capture timed out/, "1237"],
     ]) {
       const unavailable = await browser.newContext({ignoreHTTPSErrors:true});
+      await signIn(unavailable, url);
       await unavailable.addInitScript(code => {
         navigator.geolocation.getCurrentPosition = (_success, error) => error({code});
       }, code);
@@ -91,6 +94,7 @@ async function save(page) {
       await unavailable.close();
     }
     const unanswered = await browser.newContext({ignoreHTTPSErrors:true});
+    await signIn(unanswered, url);
     await unanswered.addInitScript(() => { navigator.geolocation.getCurrentPosition = () => {}; });
     const waiting = await unanswered.newPage();
     await enterVisit(waiting);

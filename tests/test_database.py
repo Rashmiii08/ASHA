@@ -58,7 +58,7 @@ def test_legacy_identifier_and_followup_are_read_without_migration(tmp_path):
     store = Register(path, Fernet.generate_key())
     payload = store.encode({"beneficiary_id": "DEMO-OLD", "next_visit_date": "2020-01-01", "followup_completed": False})
     with store.connection() as db:
-        db.execute("INSERT INTO visits VALUES (?, ?, ?)", ("legacy", "2020-01-01", payload))
+        db.execute("INSERT INTO visits (id, created_at, payload) VALUES (?, ?, ?)", ("legacy", "2020-01-01", payload))
     record, = store.list()
     assert record["beneficiary_id"] == "DEMO-OLD"
     assert record["followups"][0]["date"] == "2020-01-01"
@@ -75,7 +75,7 @@ def test_location_is_encrypted_and_old_payloads_are_untouched(tmp_path):
     register = Register(path, key)
     old = register.encode({"beneficiary_id": "9900", "next_visit_date": None})
     with register.connection() as db:
-        db.execute("INSERT INTO visits VALUES (?, ?, ?)", ("old", "2020-01-01", old))
+        db.execute("INSERT INTO visits (id, created_at, payload) VALUES (?, ?, ?)", ("old", "2020-01-01", old))
 
     point = VisitLocation(latitude=12.345678, longitude=76.54321, accuracy_m=12, captured_at="2026-11-22T09:00:00Z")
     register.insert(Dialogue("en", visit=Visit(beneficiary_id="1234", visit_type="other"),
@@ -87,4 +87,22 @@ def test_location_is_encrypted_and_old_payloads_are_untouched(tmp_path):
     assert b"12.345678" not in path.read_bytes()
     with reopened.connection() as db:
         assert db.execute("SELECT payload FROM visits WHERE id = 'old'").fetchone()[0] == old
-        assert [row[1] for row in db.execute("PRAGMA table_info(visits)")] == ["id", "created_at", "payload"]
+        assert [row[1] for row in db.execute("PRAGMA table_info(visits)")] == ["id", "created_at", "payload", "owner_id"]
+
+
+
+def test_migration_adds_unassigned_owner_to_preexisting_database(tmp_path):
+    import json
+    import sqlite3
+
+    path = tmp_path / "existing.db"
+    key = Fernet.generate_key()
+    payload = Fernet(key).encrypt(json.dumps({"beneficiary_id": "1234"}).encode())
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE visits (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload BLOB NOT NULL)")
+        db.execute("INSERT INTO visits VALUES (?, ?, ?)", ("legacy", "2020-01-01", payload))
+    register = Register(path, key)
+    assert register.list(owner_id=1) == []
+    assert register.unassigned() == [{"id": "legacy", "created_at": "2020-01-01"}]
+    with register.connection() as db:
+        assert db.execute("SELECT payload, owner_id FROM visits").fetchone() == (payload, None)

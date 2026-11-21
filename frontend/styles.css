@@ -85,3 +85,6 @@ input,select,textarea{width:100%;border:1px solid #aebfb5;border-radius:9px;padd
 #save-visit{width:100%;min-height:48px}
 #location-map{width:100%;height:250px;margin:8px 0;z-index:0}
 #location-details dd{overflow-wrap:anywhere}
+#account-submit{margin-top:14px}
+.account-row{border-top:1px solid #d9e4df;padding:12px 0;display:grid;gap:8px}
+#admin-reset-code{overflow-wrap:anywhere}

@@ -19,7 +19,9 @@ from starlette import websockets as starlette_ws
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketState
 
-from .db import Register, delete_visits, demo_key
+from .auth import Accounts, COOKIE
+from .auth_routes import identity, mutation, router as auth_router
+from .db import Register, demo_key
 from .dialogue import Dialogue
 from .gnani.adapter import load_voice
 from .gnani.provider import GnaniProtocolError, GnaniUpgradeError, PrismaStream
@@ -43,19 +45,13 @@ class Hello(BaseModel):
 @dataclass
 class Session:
     dialogue: Dialogue
+    owner_id: int
     touched: float = field(default_factory=time.monotonic)
     connected: bool = False
     last_final: str | None = None
     final_sequence: int = 0
     displayed_final_sequence: int = 0
     revision: int = 0
-
-
-def same_origin(scope):
-    origin = scope.headers.get("origin")
-    return origin is None or origin in {
-        f"http://{scope.headers.get('host')}", f"https://{scope.headers.get('host')}",
-    }
 
 
 def create_live_app():
@@ -74,6 +70,8 @@ def create_live_app():
         app.state.register = await run_in_threadpool(
             lambda: Register(path, key.encode() if key else demo_key(path.with_suffix(".key")))
         )
+        app.state.password_slots = asyncio.Semaphore(2)
+        app.state.accounts = await run_in_threadpool(Accounts, app.state.register)
         app.state.voice = None
         app.state.voice_error = None
         app.state.gemini = configured_gemini() if mode == "real" else None
@@ -91,43 +89,62 @@ def create_live_app():
 
     app = FastAPI(title="Voice Field Register", lifespan=lifespan)
 
+    app.include_router(auth_router)
+
+    @app.middleware("http")
+    async def security_headers(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        return response
+
     @app.get("/api/status")
-    async def status():
+    async def status(request: Request):
+        await identity(request, "worker")
         return {"mode": mode, "voice_ready": bool(app.state.voice), "voice_error": app.state.voice_error,
                 "gemini_configured": bool(app.state.gemini)}
 
     @app.get("/api/visits")
-    async def visits(request: Request, response: Response):
-        response.headers["Cache-Control"] = "no-store"
-        records = await run_in_threadpool(app.state.register.list)
-        if request.url.scheme != "https":
-            for record in records:
-                record.pop("location", None)
-        return records
+    async def visits(request: Request):
+        worker = await identity(request, "worker")
+        return await run_in_threadpool(app.state.register.list, owner_id=worker["id"])
 
     @app.patch("/api/visits/{visit_id}/followup")
     async def complete(visit_id: UUID, request: Request, followup_id: str = "visit"):
-        if not same_origin(request):
-            raise HTTPException(403)
-        if not await run_in_threadpool(app.state.register.complete_followup, str(visit_id), followup_id):
+        mutation(request)
+        worker = await identity(request, "worker")
+        if not await run_in_threadpool(app.state.register.complete_followup, str(visit_id), followup_id,
+                                       owner_id=worker["id"]):
             raise HTTPException(404, "Follow-up not found")
         return {"completed": True}
 
     @app.delete("/api/visits")
     async def clear(request: Request):
-        if not same_origin(request) or request.headers.get("x-confirm-delete") != "synthetic-visits":
+        mutation(request)
+        worker = await identity(request, "worker")
+        if mode != "demo" or request.headers.get("x-confirm-delete") != "synthetic-visits":
             raise HTTPException(403)
-        def apply():
-            with app.state.register.connection() as db:
-                delete_visits(db)
-        await run_in_threadpool(apply)
+        await run_in_threadpool(app.state.register.clear_worker_visits, worker["id"])
+        for key, session in list(sessions.items()):
+            if session.owner_id == worker["id"] and not session.connected:
+                del sessions[key]
         return {"deleted": True}
 
     @app.websocket("/ws")
     async def websocket(socket: WebSocket):
-        if not same_origin(socket):
+        if socket.url.scheme != "wss" or socket.headers.get("origin") != f"https://{socket.headers.get('host')}":
             await socket.close(code=1008)
             return
+        auth_token = socket.cookies.get(COOKIE)
+        worker = await run_in_threadpool(app.state.accounts.session, auth_token)
+        if not worker or worker["role"] != "worker":
+            await socket.close(code=4401)
+            return
+        owner_id = worker["id"]
         await socket.accept()
         secure_location_transport = socket.url.scheme == "wss"
         session = None
@@ -253,7 +270,9 @@ def create_live_app():
                 await play(reply, round((time.monotonic() - started) * 1000))
 
         async def store(draft):
-            await run_in_threadpool(app.state.register.insert, draft)
+            if not await run_in_threadpool(app.state.accounts.session, auth_token):
+                raise ValueError("Authentication expired")
+            await run_in_threadpool(app.state.register.insert, draft, owner_id=owner_id)
 
         async def receive(stream=None):
             nonlocal browser_gone, audio_chunks, audio_bytes, capture_paused
@@ -440,8 +459,15 @@ def create_live_app():
                 tasks.clear()
                 await stop_playback()
 
+        async def monitor_auth():
+            while await run_in_threadpool(app.state.accounts.session, auth_token):
+                await asyncio.sleep(3)
+            await send({"type": "auth_expired"})
+            return
+
         async def run(stream=None):
-            tasks.update((asyncio.create_task(receive(stream)), asyncio.create_task(turns())))
+            tasks.update((asyncio.create_task(receive(stream)), asyncio.create_task(turns()),
+                          asyncio.create_task(monitor_auth())))
             if stream:
                 tasks.add(asyncio.create_task(transcripts(stream)))
             try:
@@ -480,6 +506,9 @@ def create_live_app():
                     del sessions[token]
             token = str(hello.session) if hello.session else str(uuid4())
             existing = sessions.get(token)
+            if existing and existing.owner_id != owner_id:
+                await error("The server session expired. Start a new visit.", fatal=True)
+                return
             if existing and existing.connected:
                 await error("The session is reconnecting.", fatal=False)
                 return
@@ -489,7 +518,7 @@ def create_live_app():
             if existing is None and len(sessions) >= 128:
                 await error("The register is at capacity. Try again shortly.", fatal=True)
                 return
-            session = existing or Session(Dialogue(hello.language))
+            session = existing or Session(Dialogue(hello.language), owner_id)
             sessions[token] = session
             session.connected = True
             dialogue = session.dialogue

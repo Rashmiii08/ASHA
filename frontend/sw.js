@@ -1,4 +1,4 @@
-const cacheName = "field-register-shell-v11";
+const cacheName = "field-register-shell-v12";
 const shell = ["/", "/app.js", "/styles.css", "/audio-worklet.js", "/manifest.json",
   "/icon-192.png", "/icon-512.png", "/vendor/leaflet/leaflet.js", "/vendor/leaflet/leaflet.css",
   "/vendor/leaflet/images/marker-icon.png", "/vendor/leaflet/images/marker-icon-2x.png",

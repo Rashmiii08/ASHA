@@ -17,7 +17,7 @@
 <div class="layout">
   <aside class="sidebar">
     <a href="#dashboard" class="brand"><span class="brand-mark" aria-hidden="true">✚</span><span>Field Register<small>ASHA WORKSPACE</small></span></a>
-    <nav aria-label="Main navigation">
+    <nav id="worker-navigation" aria-label="Main navigation" hidden>
       <a href="#dashboard" data-route="dashboard"><span aria-hidden="true">⌂</span> Dashboard</a>
       <a href="#live" data-route="live"><span aria-hidden="true">◉</span> Voice visit</a>
       <a href="#history" data-route="history"><span aria-hidden="true">▤</span> Visit history</a>
@@ -29,10 +29,55 @@
   <main id="main">
     <header class="topbar">
       <span id="page-label">Dashboard</span>
-      <div class="top-status"><span id="mode" hidden></span><span id="network" role="status"><i></i> Checking connection</span></div>
+      <div class="top-status"><button id="logout" type="button" class="secondary" hidden>Sign out</button><span id="mode" hidden></span><span id="network" role="status"><i></i> Checking connection</span></div>
     </header>
     <div class="content">
       <p id="notice" role="status" hidden></p>
+      <section id="account" hidden>
+        <div class="card onboarding">
+          <h1 id="account-title">Sign in</h1>
+          <p id="account-message" role="status"></p>
+          <form id="account-form">
+            <div id="registration-fields" hidden>
+              <label for="account-name">Full name</label><input id="account-name" autocomplete="name" maxlength="100">
+              <label for="account-phone">Mobile number</label><input id="account-phone" type="tel" autocomplete="tel" maxlength="13">
+              <label for="account-village">Assigned village or area</label><input id="account-village" maxlength="100">
+            </div>
+            <div id="worker-id-field">
+              <label for="account-id">Worker ID</label><input id="account-id" autocomplete="username" maxlength="32">
+            </div>
+            <div id="reset-code-field" hidden>
+              <label for="account-code">Reset code from your administrator</label><input id="account-code" autocomplete="one-time-code" maxlength="43">
+            </div>
+            <div id="password-field">
+              <label for="account-password">Password</label><input id="account-password" type="password" autocomplete="current-password" maxlength="128">
+            </div>
+            <div id="confirm-password-field" hidden>
+              <label for="account-confirm">Confirm password</label><input id="account-confirm" type="password" autocomplete="new-password" maxlength="128">
+            </div>
+            <button id="account-submit" type="submit">Sign in</button>
+          </form>
+          <div class="voice-actions">
+            <button class="secondary" type="button" data-account-page="login">Sign in</button>
+            <button class="secondary" type="button" data-account-page="register">Register as a worker</button>
+            <button class="secondary" type="button" data-account-page="forgot">Forgot password</button>
+            <button class="secondary" type="button" data-account-page="reset">Enter a reset code</button>
+          </div>
+        </div>
+      </section>
+      <section id="administration" hidden>
+        <div class="page-intro"><h1>Worker administration</h1></div>
+        <div class="card">
+          <h2>Worker accounts</h2>
+          <div id="admin-workers"></div>
+          <p id="admin-reset-code" role="status" hidden></p>
+        </div>
+        <div class="card">
+          <h2>Unassigned legacy visits</h2>
+          <p>Match each record ID against your authorized migration roster before assigning it.</p>
+          <div id="admin-visits"></div>
+        </div>
+      </section>
       <section id="welcome" hidden>
         <div class="card onboarding">
           <span class="brand-mark" aria-hidden="true">✚</span>
@@ -45,7 +90,7 @@
         </div>
       </section>
       <section id="dashboard" hidden>
-        <div class="page-intro"><p class="eyebrow" id="today"></p><h1>Welcome, ASHA worker</h1><p>Your visits and follow-ups in one place.</p></div>
+        <div class="page-intro"><p class="eyebrow" id="today"></p><h1 id="worker-welcome">Welcome, ASHA worker</h1><p id="worker-assignment"></p></div>
         <div class="hero">
           <div>
             <h2>Start a voice visit</h2>
@@ -58,6 +103,10 @@
         <div class="card">
           <div class="section-header"><h2>Recent visits</h2><a href="#history">View history →</a></div>
           <div id="recent"></div>
+        </div>
+        <div class="card">
+          <div class="section-header"><h2>Upcoming follow-ups</h2><a href="#followups">View follow-ups →</a></div>
+          <div id="dashboard-followups"></div>
         </div>
       </section>
       <section id="live" hidden>
