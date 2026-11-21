@@ -4,7 +4,7 @@ PHRASES = {
         "danger": "Danger sign detected. Please refer to the Primary Health Centre immediately.",
         "missing": "Please say the beneficiary ID and visit type if you have them.",
         "unclear": "Please repeat the field name and its value.",
-        "confirm": "Say yes, save it, or tell me what to correct.",
+        "confirm": "Say “save it” to confirm, or tell me what to correct.",
         "saved": "Visit saved.",
         "fields": ["Beneficiary ID", "Visit type", "Weight in kilograms", "Vaccinations due",
                    "Next visit", "Temperature in Celsius", "Systolic pressure", "Diastolic pressure"],

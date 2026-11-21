@@ -107,3 +107,51 @@ def test_general_health_classification_and_caregiver_context_with_model():
         assert list(dialogue.conditions) == ["Diabetes"]
 
     asyncio.run(exercise())
+
+
+def test_natural_diagnosis_replies_advance_without_saving_or_reextracting():
+    async def reject(*_):
+        raise AssertionError("A question answer must not trigger extraction or saving")
+
+    async def exercise():
+        dialogue = Dialogue("en")
+        await dialogue.process("Beneficiary ID DEMO-42. General health visit. The patient has sugar and high BP.", None, reject)
+        assert dialogue.pending_condition == "Diabetes"
+        reply = await dialogue.process("Maybe.", reject, reject)
+        assert "couldn’t tell" in reply and "Diabetes" in reply
+        assert dialogue.pending_condition == "Diabetes"
+
+        reply = await dialogue.process("Yes, they have.", reject, reject)
+        assert "patient-reported previous diagnosis" in reply and "Hypertension" in reply
+        assert "Diabetes" not in reply
+        assert dialogue.pending_condition == "Hypertension"
+        reply = await dialogue.process("No.", reject, reject)
+        assert "patient-reported." in reply and "other health concerns" in reply
+        assert dialogue.pending_condition is None
+        assert dialogue.conditions == {
+            "Diabetes": "patient_reported_previous_diagnosis",
+            "Hypertension": "patient_reported",
+        }
+        reply = await dialogue.process("Not yet.", reject, reject)
+        assert "Confirm & Save" in reply
+        assert dialogue.state == "CONFIRMING"
+        assert dialogue.visit.beneficiary_id == "DEMO-42"
+        assert dialogue.visit.visit_type == "general_health"
+        assert dialogue.notes[-4:] == ["Maybe.", "Yes, they have.", "No.", "Not yet."]
+        # A bare yes is never a substitute for explicit save intent.
+        await dialogue.process("Yes.", reject, reject)
+        assert dialogue.state == "CONFIRMING"
+
+    asyncio.run(exercise())
+
+
+def test_correct_answers_diagnosis_and_yes_to_other_concerns_prompts_for_details():
+    async def exercise():
+        dialogue = Dialogue("en")
+        await dialogue.process("Beneficiary ID DEMO-43. General health visit. I have sugar.", None, None)
+        assert "other health concerns" in await dialogue.process("Correct.", None, None)
+        assert "What other health concern" in await dialogue.process("Yes.", None, None)
+        assert dialogue.state == "LISTENING"
+        assert dialogue.conditions["Diabetes"] == "patient_reported_previous_diagnosis"
+
+    asyncio.run(exercise())

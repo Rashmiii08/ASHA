@@ -27,7 +27,7 @@ CAREGIVER = re.compile(r"\b(?:i am|i['’]m|speaking as)\s+(?:the |a )?(?:caregi
 def reported_terms(text, *, first_person_patient=True):
     text = text.casefold().strip()
     mixed_speakers = bool(
-        CAREGIVER.search(text) or (re.search(rf"\b{PATIENT}\b", text) and not PATIENT_SPEAKER.search(text))
+        CAREGIVER.search(text) or (re.search(rf"\b{PATIENT}\b(?!\s+id\b)", text) and not PATIENT_SPEAKER.search(text))
     )
     reports = []
     ambiguous = False

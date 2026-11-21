@@ -11,9 +11,29 @@ from .schemas import Extraction, Visit, VisitReview
 from .terminology import CAREGIVER, DIAGNOSIS_QUESTIONS, PATIENT_SPEAKER, reported_terms
 
 CONFIRM = {
-    "yes", "save", "save it", "yes save it", "yes save", "confirm", "हाँ", "हां",
+    "save", "save it", "yes save it", "yes save", "confirm",
     "हाँ सेव करें", "हां सेव करें", "सेव करें",
 }
+
+
+YES_ANSWERS = {
+    "yes", "yes they have", "yes they did", "correct", "that's correct",
+    "they have", "they did", "हाँ", "हां",
+}
+NO_ANSWERS = {
+    "no", "not yet", "no not yet", "no they haven't", "no they have not",
+    "they haven't", "they have not", "no they didn't", "never", "नहीं", "नही",
+}
+UNCLEAR_ANSWERS = {
+    "maybe", "not sure", "i don't know", "i am not sure", "i'm not sure", "unsure",
+    "i think so", "yes and no", "yes but i'm not sure",
+}
+OTHER_CONCERNS_QUESTION = "Do you have any other health concerns?"
+
+
+def spoken_command(text):
+    words = re.sub(r"[^\w\s\u0900-\u097f']", " ", text.casefold().replace("’", "'"))
+    return " ".join(words.split())
 
 
 GENERAL_HEALTH = re.compile(r"\bgeneral health visit\b", re.I)
@@ -71,6 +91,7 @@ class Dialogue:
     remaining_questions: list[str] = field(default_factory=list)
     needs_clarification: bool = False
     caregiver_speaking: bool = False
+    awaiting_other_concerns: bool = False
 
     def apply_review(self, review: VisitReview):
         selected = set(review.retained_conditions)
@@ -84,6 +105,7 @@ class Dialogue:
         self.pending_condition = None
         self.remaining_questions.clear()
         self.needs_clarification = False
+        self.awaiting_other_concerns = False
         self.danger = assess(self.visit, "\n".join(self.notes), [])
         self.state = "CONFIRMING" if self.visit.beneficiary_id and self.visit.visit_type else "LISTENING"
 
@@ -109,26 +131,47 @@ class Dialogue:
     async def process(self, text, extract, store, *, allow_save=True):
         if self.state == "SAVED":
             return self.phrases["saved"]
-        command = re.sub(r"[^\w\s\u0900-\u097f]", "", text.casefold()).strip()
-        if self.pending_condition and not self.needs_clarification and command in {"yes", "no", "हाँ", "हां", "नहीं", "नही"}:
+        command = spoken_command(text)
+        yes = command in YES_ANSWERS
+        no = command in NO_ANSWERS
+        alert = self.phrases["danger"] if self.danger else ""
+        if self.pending_condition and not self.needs_clarification and (yes or no):
             self.notes.append(text)
-            if command in {"yes", "हाँ", "हां"}:
+            if yes:
                 self.conditions[self.pending_condition] = "patient_reported_previous_diagnosis"
                 reply = "I’ll record that as a patient-reported previous diagnosis."
             else:
                 reply = "I’ll record it as patient-reported."
             self.pending_condition = self.remaining_questions.pop(0) if self.remaining_questions else None
             if self.pending_condition:
-                return " ".join(filter(None, (self.phrases["danger"] if self.danger else "", reply, self.diagnosis_question())))
+                return " ".join(filter(None, (alert, reply, self.diagnosis_question())))
             self.state = "CONFIRMING" if self.visit.beneficiary_id and self.visit.visit_type else "LISTENING"
-            followup = self.phrases["missing"] if self.state == "LISTENING" else "Do you have any other health concerns?"
-            return " ".join(filter(None, (self.phrases["danger"] if self.danger else "", reply, followup)))
+            self.awaiting_other_concerns = self.state == "CONFIRMING"
+            followup = OTHER_CONCERNS_QUESTION if self.awaiting_other_concerns else self.phrases["missing"]
+            return " ".join(filter(None, (alert, reply, followup)))
+        if self.awaiting_other_concerns and (yes or no):
+            self.notes.append(text)
+            self.awaiting_other_concerns = False
+            if yes:
+                self.state = "LISTENING"
+                reply = "Understood. What other health concern would you like to report?"
+            else:
+                reply = "Understood. Review the visit and select Confirm & Save when ready."
+            return " ".join(filter(None, (alert, reply)))
+        if command in UNCLEAR_ANSWERS and (self.pending_condition or self.awaiting_other_concerns):
+            self.notes.append(text)
+            question = self.diagnosis_question() if self.pending_condition else OTHER_CONCERNS_QUESTION
+            return " ".join(filter(None, (alert, "I couldn’t tell from that answer.", question)))
+        if yes or no:
+            self.notes.append(text)
+            return " ".join(filter(None, (alert, self.phrases["unclear"])))
         if command in CONFIRM:
             if allow_save:
                 return await self.confirm(store)
             return "Review the visit and select Confirm & Save when ready."
 
         self.notes.append(text)
+        self.awaiting_other_concerns = False
         if CAREGIVER.search(text):
             self.caregiver_speaking = True
         elif PATIENT_SPEAKER.search(text):
@@ -193,5 +236,6 @@ class Dialogue:
             if name in fields:
                 value = fields[name]
                 spoken.append(f"{label}: {', '.join(value) if isinstance(value, list) else value}.")
-        followup = "Do you have any other health concerns?" if reported else self.phrases["confirm"]
+        self.awaiting_other_concerns = bool(reported)
+        followup = OTHER_CONCERNS_QUESTION if self.awaiting_other_concerns else self.phrases["confirm"]
         return " ".join(filter(None, [alert, *spoken, followup]))

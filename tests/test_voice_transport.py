@@ -288,3 +288,56 @@ def test_live_stop_drains_final_and_saves_only_after_explicit_confirmation(tmp_p
             socket.send_json({"type": "confirm_visit", "revision": draft["revision"]})
             assert socket.receive_json()["state"] == "SAVED"
         assert [record["beneficiary_id"] for record in client.get("/api/visits").json()] == ["DEMO-54"]
+
+
+def test_live_diagnosis_reply_reaches_voice_and_stop_requires_explicit_save(tmp_path, monkeypatch):
+    texts = [
+        "Beneficiary ID DEMO-61. General health visit. The patient has sugar and high BP.",
+        "Yes, they have.",
+        "No.",
+    ]
+    spoken = []
+
+    class ConversationalProvider(ProviderDouble):
+        async def transcripts(self):
+            for text in texts:
+                await self.input.get()
+                yield text, True
+            await asyncio.Future()
+
+        async def speak(self, text, language):
+            spoken.append(text)
+            yield bytes(3200)
+
+    monkeypatch.setattr(live, "load_voice", ConversationalProvider)
+    monkeypatch.setenv("APP_MODE", "real")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "conversation.db"))
+    monkeypatch.setenv("DATA_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+
+    with TestClient(live.create_live_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            socket.send_json({"type": "hello"})
+            assert [socket.receive_json()["type"] for _ in range(5)] == ["ready", "update", "assistant", "audio", "audio_end"]
+            for text, next_question in zip(texts, ("Diabetes", "Hypertension", "other health concerns")):
+                socket.send_json({"type": "audio", "data": base64.b64encode(bytes(3200)).decode()})
+                assert socket.receive_json()["text"] == text
+                assert socket.receive_json()["state"] == "PROCESSING"
+                draft = socket.receive_json()
+                assert next_question in socket.receive_json()["text"]
+                assert socket.receive_json()["type"] == "audio"
+                assert socket.receive_json()["type"] == "audio_end"
+                assert next_question in spoken[-1]
+                assert not client.get("/api/visits").json()
+            socket.send_json({"type": "pause_capture"})
+            assert socket.receive_json()["type"] == "capture_paused"
+            assert not client.get("/api/visits").json()
+            socket.send_json({"type": "confirm_visit", "revision": draft["revision"]})
+            assert socket.receive_json()["state"] == "SAVED"
+
+        records = client.get("/api/visits").json()
+        assert len(records) == 1
+        assert records[0]["reported_conditions"] == [
+            {"term": "Diabetes", "source": "patient_reported_previous_diagnosis"},
+            {"term": "Hypertension", "source": "patient_reported"},
+        ]
