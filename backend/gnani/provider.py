@@ -4,6 +4,8 @@ import asyncio
 import base64
 import json
 import logging
+import math
+import struct
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -16,6 +18,11 @@ WIRE_LOG = logging.Logger("gnani.websocket", logging.CRITICAL + 1)
 
 PRISMA_URL = "wss://api.vachana.ai/stt/v3/stream"
 TIMBRE_URL = "wss://api.vachana.ai/api/v1/tts"
+FRAME_SAMPLES = 512
+FRAME_BYTES = FRAME_SAMPLES * 2
+FRAME_SECONDS = FRAME_SAMPLES / 16000
+VAD_THRESHOLD = "0.5"
+MIN_SILENCE_MS = "700"
 
 
 class GnaniConnectionError(ConnectionError):
@@ -36,6 +43,8 @@ class GnaniTransport:
             "model": "prisma-v3.0",
             "x-sample-rate": "16000",
             "format": "transcribe",
+            "x-vad-threshold": VAD_THRESHOLD,
+            "x-min-silence-ms": MIN_SILENCE_MS,
         })
 
     def timbre(self):
@@ -87,25 +96,53 @@ class PrismaStream:
         self._buffer = bytearray()
         self._next_frame_at = 0.0
         self._frames_sent = 0
+        self._silent_frames = 0
+        self._max_rms = 0.0
+        self._peak = 0
 
     async def send_pcm(self, pcm: bytes) -> None:
         if len(pcm) % 2:
             raise ValueError("Prisma requires complete PCM16 samples.")
         self._buffer.extend(pcm)
-        frame_size = 1024
         loop = asyncio.get_running_loop()
-        if self._next_frame_at < loop.time() - 0.032:
+        if self._next_frame_at < loop.time() - FRAME_SECONDS:
             self._next_frame_at = loop.time()
-        while len(self._buffer) >= frame_size:
+        while len(self._buffer) >= FRAME_BYTES:
             delay = self._next_frame_at - loop.time()
             if delay > 0:
                 await asyncio.sleep(delay)
-            await self._socket.send(bytes(self._buffer[:frame_size]))
-            del self._buffer[:frame_size]
+            frame = bytes(self._buffer[:FRAME_BYTES])
+            await self._socket.send(frame)
+            del self._buffer[:FRAME_BYTES]
             self._frames_sent += 1
-            if self._frames_sent == 1 or self._frames_sent % 300 == 0:
-                LOG.info("Prisma PCM frames sent: frames=%d bytes=%d", self._frames_sent, self._frames_sent * frame_size)
-            self._next_frame_at = max(self._next_frame_at + 0.032, loop.time())
+            if LOG.isEnabledFor(logging.INFO):
+                self._record_level(frame)
+            # Catch up after small scheduling delays without sending frames back-to-back.
+            self._next_frame_at = max(self._next_frame_at + FRAME_SECONDS, loop.time() + 0.028)
+
+    def _record_level(self, frame: bytes) -> None:
+        peak = energy = 0
+        for (sample,) in struct.iter_unpack("<h", frame):
+            peak = max(peak, abs(sample))
+            energy += sample * sample
+        self._silent_frames += peak == 0
+        self._max_rms = max(self._max_rms, math.sqrt(energy / FRAME_SAMPLES))
+        self._peak = max(self._peak, peak)
+        if self._frames_sent in (1, 32) or self._frames_sent % 300 == 0:
+            LOG.info(
+                "Prisma PCM frames sent: frames=%d bytes=%d silent_frames_window=%d "
+                "max_rms_dbfs=%.1f peak_dbfs=%.1f",
+                self._frames_sent, self._frames_sent * FRAME_BYTES, self._silent_frames,
+                20 * math.log10(max(1, self._max_rms) / 32768),
+                20 * math.log10(max(1, self._peak) / 32768),
+            )
+            self._silent_frames = self._max_rms = self._peak = 0
+
+    async def finish_utterance(self) -> None:
+        if self._buffer:
+            await self.send_pcm(bytes(FRAME_BYTES - len(self._buffer)))
+        await self._socket.send(json.dumps({"type": "commit"}))
+        LOG.info("Prisma utterance commit sent")
 
     async def transcripts(self) -> AsyncIterator[tuple[str, bool]]:
         async for raw in self._socket:
@@ -136,7 +173,8 @@ class GnaniVoice(GnaniTransport):
             config = message.get("config")
             if not isinstance(config, dict) or config.get("sample_rate") != 16000 or config.get("chunk_size") != 512:
                 raise GnaniProtocolError("Gnani Prisma negotiated an unexpected audio format.")
-            LOG.info("Prisma stream ready: sample_rate=16000 frame_samples=512")
+            LOG.info("Prisma stream ready: sample_rate=16000 frame_samples=512 vad_threshold=%s min_silence_ms=%s",
+                     VAD_THRESHOLD, MIN_SILENCE_MS)
             yield PrismaStream(socket)
 
     async def speak(self, text: str, language: str) -> AsyncIterator[bytes]:

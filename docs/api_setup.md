@@ -16,7 +16,7 @@ Use synthetic visit notes when sending data to external providers. Keep keys in 
 | Prisma | `prisma-v3.0` | `wss://api.vachana.ai/stt/v3/stream` | `x-api-key-id` |
 | Timbre | `timbre-v3.0` | `wss://api.vachana.ai/api/v1/tts` | `X-API-Key-ID` |
 
-Prisma is configured through upgrade headers and acknowledges with `connected`. The adapter batches microphone data into 1,024-byte raw PCM frames and submits completed `transcript` segments to the ASHA dialogue. The supplied Prisma PDF was truncated after page 19 of 34. The recovered pages and published SDK document completed segments. Support for a distinct partial-transcript event is pending a complete reference.
+Prisma is configured through upgrade headers and acknowledges with `connected`. The browser renders mono, little-endian, signed PCM16 at 16 kHz in 1,024-byte (32 ms) frames. The adapter paces the binary WebSocket frames, keeps silence flowing between words, uses the documented web-microphone VAD threshold of 0.5 with 700 ms of trailing silence, and submits completed `transcript` segments to the ASHA dialogue. The supplied Prisma PDF was truncated after page 19 of 34. The recovered pages and published SDK document completed segments. Support for a distinct partial-transcript event is pending a complete reference.
 
 Timbre uses the documented v3.0 voice Shivani and requests raw 16 kHz mono PCM16. The adapter streams base64-decoded `audio` messages and stops on `complete`, cancellation or error. The existing ASHA language picker offers English and Hindi. Provider request construction for Kannada is covered by a mock test.
 
@@ -40,7 +40,9 @@ Refresh the app, grant microphone access, and say a short **synthetic** visit no
 
 1. **Prisma stream ready** means the upgrade and negotiated audio configuration succeeded. A rejected upgrade logs the HTTP status. Check the Codex hostname allowlist and Gnani account access for authentication or authorization errors.
 2. **Browser microphone PCM received** means the browser sent audio through ASHA's WebSocket. If this is absent, check the browser's microphone permission, selected input, and waveform. A successful capture status indicates frames are being produced, even if the input is silent.
-3. **Prisma PCM frames sent** means ASHA wrote audio frames to the upstream WebSocket. If these are present with no speech events, check the actual input level, background noise and pause between utterances.
+3. **Prisma PCM frames sent** means ASHA wrote audio frames to the upstream WebSocket. Compare the windowed RMS and peak dBFS values while speaking. A window consisting of silent frames indicates digital silence. If the signal reaches Prisma but no speech event appears, tap **Finish speaking** and check for `Prisma utterance commit sent`. This asks Prisma to close an open utterance and does not save the visit.
 4. **Prisma event: speech_start**, **processing**, and **transcript** identify the provider stages. An empty final gets its own log entry.
 
 Application diagnostics record counts, event types, and HTTP status codes. Leave WebSocket wire logging disabled, since it can include credentials and payloads.
+
+On Render, deploy the GitHub commit to the existing service, keep the existing real-mode secrets and startup command, and open the direct HTTPS app URL in current Android Chrome or iPhone Safari. Allow microphone access after tapping Start voice visit. If a service worker is serving an older copy, close existing app tabs and reopen the site after deployment.

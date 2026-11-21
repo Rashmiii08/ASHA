@@ -34,7 +34,7 @@ function localDate(date = new Date()) {
 
 function navigate() {
   const hash = location.hash.slice(1);
-  route = Object.hasOwn(routes, hash) ? hash : (localStorage.getItem("field-language") ? "dashboard" : "welcome");
+  route = Object.prototype.hasOwnProperty.call(routes, hash) ? hash : (localStorage.getItem("field-language") ? "dashboard" : "welcome");
   for (const name of Object.keys(routes)) $(name).hidden = name !== route;
   for (const link of document.querySelectorAll("[data-route]")) {
     if (link.dataset.route === route) link.setAttribute("aria-current", "page");
@@ -52,6 +52,8 @@ function setPhase(value) {
   $("start-voice").disabled = active || starting || !online || !!config?.voice_error;
   $("start-voice").classList.toggle("active", value === "Listening" && config?.mode === "real");
   $("interrupt").disabled = !ready;
+  $("finish-utterance").hidden = config?.mode !== "real";
+  $("finish-utterance").disabled = !ready;
   $("demo-send").disabled = !ready || value === "Processing";
   $("demo-confirm").hidden = config?.mode !== "demo" || draftState !== "CONFIRMING";
   $("save-visit").disabled = !ready || value === "Processing";
@@ -133,9 +135,15 @@ function renderRecords() {
 }
 
 async function request(url, options = {}) {
-  const response = await fetch(url, {...options, cache: "no-store", signal: AbortSignal.timeout(5000)});
-  if (!response.ok) throw new Error("Request failed");
-  return response.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(url, {...options, cache: "no-store", signal: controller.signal});
+    if (!response.ok) throw new Error("Request failed");
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function refreshRecords() {
@@ -327,9 +335,11 @@ function capture({pcm, rms}) {
   draw(rms);
   const now = performance.now();
   if (rms >= .035) {
-    sustained += 1;
+    // Retain roughly 200 ms of speech before interrupting at the new 32 ms cadence.
+    const previousSamples = sustained;
+    sustained += pcm.byteLength / 2;
     lastSpeech = now;
-    if (sources.size && sustained === 2) interrupt();
+    if (sources.size && previousSamples < 3200 && sustained >= 3200) interrupt();
   } else {
     sustained = 0;
   }
@@ -353,12 +363,15 @@ async function start() {
       openedContext = new AudioContext();
       await openedContext.resume();
       openedStream = await navigator.mediaDevices.getUserMedia({
-        audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: false},
+        audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true},
       });
+      if (!openedContext.audioWorklet || !window.AudioWorkletNode) {
+        throw new Error("This browser does not support live microphone processing. Update Chrome or Safari and try again.");
+      }
       await openedContext.audioWorklet.addModule("/audio-worklet.js");
       if (thisRun !== voiceRun) return;
       microphone = openedContext.createMediaStreamSource(openedStream);
-      worklet = new AudioWorkletNode(openedContext, "field-microphone");
+      worklet = new AudioWorkletNode(openedContext, "field-microphone", {channelCount: 1, channelCountMode: "explicit"});
       mutedOutput = openedContext.createGain();
       mutedOutput.gain.value = 0;
       worklet.port.onmessage = event => {
@@ -381,7 +394,7 @@ async function start() {
     if (thisRun !== voiceRun) return;
     $("microphone-status").textContent = "Microphone · unavailable";
     notice(error.name === "NotAllowedError" ? "Microphone permission was denied. Allow access in browser settings and try again." :
-      error.message === "Microphone capture requires a supported browser on HTTPS or localhost." ? error.message :
+      /^(Microphone capture requires|This browser does not support)/.test(error.message) ? error.message :
       "Could not start microphone capture. Check browser and device permissions.");
     setPhase("Ready");
   } finally {
@@ -455,6 +468,7 @@ $("language").onchange = event => changeLanguage(event.target.value);
 $("start-voice").onclick = start;
 $("stop-voice").onclick = () => stop();
 $("interrupt").onclick = interrupt;
+$("finish-utterance").onclick = () => transmit({type: "finish_utterance"});
 $("search").oninput = renderRecords;
 $("demo-form").onsubmit = event => { event.preventDefault(); sendDemo($("demo-text").value); };
 $("sample").onclick = () => {

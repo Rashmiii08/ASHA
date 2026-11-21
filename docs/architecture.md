@@ -27,7 +27,7 @@ The server validates WebSocket message types and payload sizes. It uses a bounde
 ## WebSocket contract
 
 - Client sends `hello` with `language` set to `en` or `hi` and optional `session`. Server replies with `ready`, the session token, mode and resume flag.
-- Client sends `audio` with base64 signed little-endian mono PCM16 at 16 kHz, normally 100 ms per message. Client sends `interrupt` to cancel reply audio.
+- Client sends `audio` with base64 signed little-endian mono PCM16 at 16 kHz, one 512-sample (32 ms) frame per message. Client sends `interrupt` to cancel reply audio or `finish_utterance` to request Prisma’s documented `commit` for the current speech segment. This control does not confirm or save the visit.
 - Server sends `audio` with the same PCM encoding, `is_first_chunk` and `generation`. The browser discards stale audio by generation.
 - Server sends `update` with `state`, `form`, `danger_flag` and `latency_ms`. The server leaves that field null until timing is available, and first playable audio is measured separately in the browser.
 - Extensions include `transcript` with `text` and `final`, `phase` with transient processing state, `assistant` with reply text, generation and `processing_ms`, `audio_end`, `interrupted`, `heartbeat`, and `error` with `message` and `fatal`.

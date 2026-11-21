@@ -13,6 +13,7 @@ class ProviderDouble:
     def __init__(self):
         self.interrupted = False
         self.closed = False
+        self.finished = Event()
 
     @asynccontextmanager
     async def listen(self, language):
@@ -25,6 +26,9 @@ class ProviderDouble:
 
     async def send_pcm(self, pcm):
         await self.input.put(pcm)
+
+    async def finish_utterance(self):
+        self.finished.set()
 
     async def transcripts(self):
         assert await self.input.get() == bytes(3200)
@@ -60,6 +64,8 @@ def test_stream_and_interrupt_with_provider_double(tmp_path, monkeypatch):
             socket.send_json({"type": "interrupt"})
             assert socket.receive_json()["generation"] > first["generation"]
             assert provider.interrupted
+            socket.send_json({"type": "finish_utterance"})
+            assert provider.finished.wait(timeout=2)
             socket.send_json({"type": "audio", "data": base64.b64encode(bytes(3200)).decode()})
             assert socket.receive_json()["final"] is False
             assert socket.receive_json()["final"] is True

@@ -3,7 +3,7 @@
 class Microphone extends AudioWorkletProcessor {
   phase = 0;
   sum = 0;
-  chunk = new Int16Array(1600);
+  chunk = new DataView(new ArrayBuffer(1024));
   position = 0;
   energy = 0;
 
@@ -19,13 +19,13 @@ class Microphone extends AudioWorkletProcessor {
         remaining -= amount;
         if (this.phase < sampleRate) continue;
         const value = Math.max(-1, Math.min(1, this.sum / sampleRate));
-        this.chunk[this.position++] = Math.round(value * (value < 0 ? 32768 : 32767));
+        this.chunk.setInt16(this.position++ * 2, Math.round(value * (value < 0 ? 32768 : 32767)), true);
         this.energy += value * value;
         this.sum = this.phase = 0;
-        if (this.position === this.chunk.length) {
+        if (this.position === this.chunk.byteLength / 2) {
           const pcm = this.chunk.buffer;
           this.port.postMessage({pcm, rms: Math.sqrt(this.energy / this.position)}, [pcm]);
-          this.chunk = new Int16Array(1600);
+          this.chunk = new DataView(new ArrayBuffer(1024));
           this.position = this.energy = 0;
         }
       }

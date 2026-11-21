@@ -65,7 +65,7 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
  await deniedPage.getByRole('button',{name:'Start voice visit'}).click();
  await deniedPage.getByText(/Microphone permission was denied/).waitFor();
  await denied.close();
- const capture = await browser.newContext({serviceWorkers: 'block'});
+ const capture = await browser.newContext({serviceWorkers: 'block', isMobile: true, hasTouch: true, viewport:{width:390,height:844}});
  await capture.route('**/api/status', route=>route.fulfill({json:{mode:'real',voice_ready:true,voice_error:null}}));
  await capture.addInitScript(() => {
    Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {value: async () => {
@@ -78,14 +78,18 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
      return output.stream;
    }});
  });
+ let voiceFrames = 0;
  await capture.routeWebSocket('**/ws', ws => {
    ws.onMessage(raw => {
      const message = JSON.parse(raw);
      if (message.type === 'hello') ws.send(JSON.stringify({type:'ready', session:'synthetic', mode:'real'}));
      if (message.type === 'audio') {
        const bytes = Buffer.from(message.data, 'base64');
-       assert.equal(bytes.length, 3200);
-       assert.ok(bytes.some(byte => byte !== 0));
+       assert.equal(bytes.length, 1024);
+       if (bytes.some(byte => byte !== 0)) voiceFrames += 1;
+     }
+     if (message.type === 'finish_utterance') {
+       assert.ok(voiceFrames > 0);
        ws.send(JSON.stringify({type:'transcript', text:'Synthetic microphone test', final:true}));
      }
    });
@@ -93,6 +97,11 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
  const capturePage = await capture.newPage();
  await capturePage.goto(baseURL + '/#live');
  await capturePage.getByRole('button',{name:'Start voice visit'}).click();
+ for (let attempt = 0; voiceFrames === 0 && attempt < 100; attempt++) {
+   await new Promise(resolve => setTimeout(resolve, 50));
+ }
+ assert.ok(voiceFrames > 0);
+ await capturePage.getByRole('button',{name:'Finish speaking'}).click();
  await capturePage.locator('#transcript').getByText('Synthetic microphone test').waitFor({timeout:10000});
  await capturePage.getByRole('button',{name:'Stop session'}).click();
  await capture.close();

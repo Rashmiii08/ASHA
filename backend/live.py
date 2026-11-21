@@ -242,6 +242,12 @@ def create_live_app():
                     async with playback_lock:
                         await stop_playback()
                         await send({"type": "interrupted", "generation": generation})
+                elif kind == "finish_utterance" and stream:
+                    finish = getattr(stream, "finish_utterance", None)
+                    if finish is None:
+                        await error("This voice provider does not support manual utterance completion.")
+                    else:
+                        await finish()
                 elif kind == "heartbeat":
                     await send({"type": "heartbeat"})
                 elif kind == "audio":

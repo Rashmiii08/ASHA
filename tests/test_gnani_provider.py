@@ -28,6 +28,7 @@ def test_uses_confirmed_url_and_header(monkeypatch, service, url, header):
             assert additional_headers == {
                 header: "synthetic-test-key", "language_code": "en-IN", "model": "prisma-v3.0",
                 "x-sample-rate": "16000", "format": "transcribe",
+                "x-vad-threshold": "0.5", "x-min-silence-ms": "700",
             }
         else:
             assert additional_headers == {header: "synthetic-test-key"}
@@ -233,3 +234,33 @@ def test_timbre_cancellation_closes_active_synthesis(monkeypatch):
         assert closed.is_set()
 
     asyncio.run(exercise())
+
+
+def test_prisma_commit_flushes_remaining_samples_and_logs_levels(caplog):
+    caplog.set_level(logging.INFO, logger=provider.__name__)
+    socket = MockSocket([])
+    speech = b"\x00\x40" * 512
+
+    async def exercise():
+        stream = provider.PrismaStream(socket)
+        await stream.send_pcm(speech + b"\x00\x40" * 3)
+        await stream.finish_utterance()
+
+    asyncio.run(exercise())
+    assert socket.sent == [speech, b"\x00\x40" * 3 + bytes(1018), '{"type": "commit"}']
+    assert "silent_frames_window=0 max_rms_dbfs=-6.0 peak_dbfs=-6.0" in caplog.text
+    assert "Prisma utterance commit sent" in caplog.text
+
+
+def test_prisma_paces_binary_frames_from_legacy_batches():
+    sent_at = []
+
+    class TimedSocket(MockSocket):
+        async def send(self, data):
+            sent_at.append(asyncio.get_running_loop().time())
+            await super().send(data)
+
+    socket = TimedSocket([])
+    asyncio.run(provider.PrismaStream(socket).send_pcm(bytes(3072)))
+    assert socket.sent == [bytes(1024)] * 3
+    assert all(later - earlier >= 0.020 for earlier, later in zip(sent_at, sent_at[1:]))
