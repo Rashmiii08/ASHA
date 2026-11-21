@@ -60,7 +60,7 @@ async def identity(request, role=None):
     return user
 
 
-async def payload(request, model, message):
+async def payload(request, model, message, *, field_messages=None):
     mutation(request)
     body = bytearray()
     async for chunk in request.stream():
@@ -69,7 +69,15 @@ async def payload(request, model, message):
             raise HTTPException(413, "The request is too large.")
     try:
         return model.model_validate(json.loads(body))
-    except (ValueError, ValidationError):
+    except ValidationError as exc:
+        messages = field_messages or {}
+        errors = [
+            messages[issue["loc"][0]]
+            for issue in exc.errors(include_input=False)
+            if issue["loc"] and issue["loc"][0] in messages
+        ]
+        raise HTTPException(422, " ".join(dict.fromkeys(errors)) or message) from None
+    except ValueError:
         raise HTTPException(422, message) from None
 
 
@@ -90,7 +98,14 @@ async def password_operation(request, function, *args):
 
 @router.post("/register", status_code=201)
 async def register(request: Request):
-    account = await payload(request, Account, "Enter a valid worker ID, Indian mobile number, area, and a password of at least 12 characters.")
+    account = await payload(request, Account, "Check the registration fields and try again.", field_messages={
+        "full_name": "Enter your full name (2–100 characters).",
+        "worker_id": "Enter a worker ID of 3–32 characters using letters, digits, hyphens, or underscores.",
+        "phone": "Enter a 10-digit Indian mobile number, with optional +91.",
+        "village": "Enter your assigned village or area (2–100 characters).",
+        "password": "Enter a password of 12–128 characters.",
+        "confirm_password": "Enter your password again in Confirm password.",
+    })
     await limit(request, "register", account.worker_id.upper())
     try:
         await password_operation(request, request.app.state.accounts.create, account)

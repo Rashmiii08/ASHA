@@ -1203,8 +1203,10 @@ $("account-form").onsubmit = async event => {
     values.village = $("account-village").value;
   }
   $("account-submit").disabled = true;
+  let registered = false;
   try {
     const result = await request(`/api/auth/${page}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(values)});
+    registered = page === "register";
     if (result.user) setUser(result.user);
     else {
       if (page === "reset") showAccountPage("login");
@@ -1213,7 +1215,9 @@ $("account-form").onsubmit = async event => {
   } catch (error) {
     $("account-message").textContent = error.message;
   } finally {
-    $("account-password").value = $("account-confirm").value = $("account-code").value = "";
+    if (page !== "register" || registered) {
+      $("account-password").value = $("account-confirm").value = $("account-code").value = "";
+    }
     $("account-submit").disabled = false;
   }
 };

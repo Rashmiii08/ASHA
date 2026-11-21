@@ -14,11 +14,15 @@ const password = process.env.ASHA_TEST_PASSWORD;
     assert.ok(await workerPage.locator("#history").isHidden());
     await workerPage.getByRole("button", {name:"Register as a worker"}).click();
     await workerPage.getByLabel("Full name").fill("Synthetic Applicant");
-    await workerPage.getByLabel("Mobile number").fill("9876543210");
+    await workerPage.getByLabel("Mobile number").fill("987654321");
     await workerPage.getByLabel("Assigned village or area").fill("Requested area");
     await workerPage.getByLabel("Worker ID").fill("APPLICANT");
     await workerPage.getByLabel("Password", {exact:true}).fill(password);
     await workerPage.getByLabel("Confirm password", {exact:true}).fill(password);
+    await workerPage.locator("#account-submit").click();
+    await workerPage.getByText(/10-digit Indian mobile number/).waitFor();
+    assert.equal(await workerPage.getByLabel("Password", {exact:true}).inputValue(), password);
+    await workerPage.getByLabel("Mobile number").fill("9876543210");
     await workerPage.locator("#account-submit").click();
     await workerPage.getByText(/administrator must approve/).waitFor();
 

@@ -223,3 +223,12 @@ def test_saved_visit_survives_application_restart(tmp_path, monkeypatch):
     with TestClient(create_live_app(), base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
         assert login(client, WORKER["worker_id"]).status_code == 200
         assert client.get("/api/visits").json() == [original]
+
+
+def test_registration_validation_reports_phone_and_password_separately(app_client):
+    phone_error = app_client.post("/api/auth/register", json={**WORKER, "phone": "987654321"})
+    assert phone_error.status_code == 422
+    assert phone_error.json()["detail"] == "Enter a 10-digit Indian mobile number, with optional +91."
+    short = app_client.post("/api/auth/register", json={**WORKER, "password": "short"})
+    assert short.status_code == 422
+    assert short.json()["detail"] == "Enter a password of 12–128 characters."
