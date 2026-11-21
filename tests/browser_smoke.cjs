@@ -86,7 +86,18 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
      if (message.type === 'audio') {
        const bytes = Buffer.from(message.data, 'base64');
        assert.equal(bytes.length, 1024);
-       if (bytes.some(byte => byte !== 0)) voiceFrames += 1;
+       if (bytes.some(byte => byte !== 0)) {
+         voiceFrames += 1;
+         if (voiceFrames === 1) {
+           ws.send(JSON.stringify({type:'transcript', text:'Synthetic partial text', final:false}));
+         }
+       }
+     }
+     if (message.type === 'heartbeat') {
+       ws.send(JSON.stringify({type:'heartbeat', audio_chunks:voiceFrames, prisma:{
+         frames:voiceFrames, nonzero_frames:voiceFrames, peak_dbfs:-12,
+         speech_starts:1, processing:0, partials:1, finals:0, empty:0, errors:0, other:0, commits:0
+       }}));
      }
      if (message.type === 'finish_utterance') {
        assert.ok(voiceFrames > 0);
@@ -101,8 +112,13 @@ const baseURL = process.env.FIELD_REGISTER_TEST_URL || 'http://127.0.0.1:8765';
    await new Promise(resolve => setTimeout(resolve, 50));
  }
  assert.ok(voiceFrames > 0);
+ await capturePage.locator('#partial-transcript').getByText('Partial · Synthetic partial text').waitFor();
+ await capturePage.locator('#voice-diagnostics summary').click();
+ await capturePage.locator('#voice-prisma-events').getByText(/1 partial/).waitFor();
+ assert.ok(!(await capturePage.locator('#voice-diagnostics').innerText()).includes('Synthetic partial text'));
  await capturePage.getByRole('button',{name:'Finish speaking'}).click();
  await capturePage.locator('#transcript').getByText('Synthetic microphone test').waitFor({timeout:10000});
+ await capturePage.locator('#partial-transcript').waitFor({state:'hidden'});
  await capturePage.getByRole('button',{name:'Stop session'}).click();
  await capture.close();
  console.log('Browser smoke passed: keyboard entry, mobile width, Hindi, danger, correction, offline draft, reconnect, confirm, history, follow-up, simulated permission denial, synthetic microphone PCM over WebSocket.');

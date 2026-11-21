@@ -22,6 +22,7 @@ from starlette.websockets import WebSocketState
 from .db import Register, delete_visits, demo_key
 from .dialogue import Dialogue
 from .gnani.adapter import load_voice
+from .gnani.provider import GnaniUpgradeError, PrismaStream
 from .llm import configured_gemini
 from .schemas import Language
 
@@ -200,11 +201,12 @@ def create_live_app():
                 if app.state.voice is not None:
                     playback = asyncio.create_task(speak(current_generation))
 
-        async def handle_text(text):
+        async def handle_text(text, *, announced=False):
             if not isinstance(text, str) or not 1 <= len(text.strip()) <= 3000:
                 await error("A transcript must contain 1 to 3000 characters.")
                 return
-            await send({"type": "transcript", "text": text, "final": True})
+            if not announced:
+                await send({"type": "transcript", "text": text, "final": True})
             await send({"type": "phase", "state": "PROCESSING"})
             started = time.monotonic()
             extract = app.state.gemini.extract if app.state.gemini else None
@@ -249,7 +251,12 @@ def create_live_app():
                     else:
                         await finish()
                 elif kind == "heartbeat":
-                    await send({"type": "heartbeat"})
+                    response = {"type": "heartbeat"}
+                    if stream:
+                        response["audio_chunks"] = audio_chunks
+                        if isinstance(stream, PrismaStream):
+                            response["prisma"] = stream.diagnostics()
+                    await send(response)
                 elif kind == "audio":
                     try:
                         pcm = base64.b64decode(message["data"], validate=True)
@@ -274,18 +281,20 @@ def create_live_app():
 
         async def transcripts(stream):
             async for text, final in stream.transcripts():
+                if not isinstance(text, str) or not 1 <= len(text.strip()) <= 3000:
+                    continue
+                await send({"type": "transcript", "text": text, "final": final})
                 if final:
                     if pending.full():
                         await error("Wait for the current turn to finish.")
                     else:
                         pending.put_nowait(text)
-                else:
-                    await send({"type": "transcript", "text": text, "final": False})
+
             raise RuntimeError("Speech stream ended")
 
         async def turns():
             while True:
-                await handle_text(await pending.get())
+                await handle_text(await pending.get(), announced=mode == "real")
 
         async def cleanup():
             # Finish joining the child tasks even if the ASGI session is cancelled.
@@ -315,7 +324,7 @@ def create_live_app():
             announced = True
             await update()
 
-        pending = asyncio.Queue(maxsize=1)
+        pending = asyncio.Queue(maxsize=8 if mode == "real" else 1)
         try:
             raw_hello = await asyncio.wait_for(socket.receive_text(), timeout=10)
             if len(raw_hello) > 1000:
@@ -359,6 +368,8 @@ def create_live_app():
                     await run(stream)
         except BROWSER_DISCONNECTS:
             browser_gone = True
+        except GnaniUpgradeError as exc:
+            await error(f"Prisma connection rejected (HTTP {exc.status}).", fatal=exc.status in (401, 403))
         except (ValueError, asyncio.TimeoutError):
             await error("The session could not be started.", fatal=True)
         except Exception as exc:

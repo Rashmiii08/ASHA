@@ -11,6 +11,8 @@ const fields = {
 const language = () => $("language").value;
 let route, records = [], config, online = false;
 let active = false, starting = false, socket, token, retry, attempts = 0, ready = false;
+let microphoneFrames = 0, nonzeroMicrophoneFrames = 0, droppedAudioFrames = 0;
+let voiceConnection = "Idle", serverAudioChunks, prismaDiagnostics;
 let phase = "Ready", draft = {}, flagged = false, draftState, heartbeat, lastReply;
 let context, stream, microphone, worklet, mutedOutput, captureTimer, nextTime = 0, generation = -1, sources = new Set();
 let voiceRun = 0, lastSpeech = 0, processing = null, sustained = 0;
@@ -53,6 +55,7 @@ function setPhase(value) {
   $("start-voice").classList.toggle("active", value === "Listening" && config?.mode === "real");
   $("interrupt").disabled = !ready;
   $("finish-utterance").hidden = config?.mode !== "real";
+  $("voice-diagnostics").hidden = config?.mode !== "real";
   $("finish-utterance").disabled = !ready;
   $("demo-send").disabled = !ready || value === "Processing";
   $("demo-confirm").hidden = config?.mode !== "demo" || draftState !== "CONFIRMING";
@@ -227,16 +230,50 @@ function playPCM(message) {
   setPhase("Speaking");
 }
 
+function renderVoiceDiagnostics() {
+  const prisma = prismaDiagnostics;
+  let status = voiceConnection;
+  if (ready && microphoneFrames === 0) status = "Connected. Waiting for microphone audio.";
+  else if (ready && nonzeroMicrophoneFrames === 0) status = "The microphone is sending silence. Check the selected input.";
+  else if (ready && serverAudioChunks === 0) status = "The microphone has audio. Waiting for the server to receive it.";
+  else if (ready && prisma?.frames && !prisma.nonzero_frames) {
+    status = "Only silent frames have been sent to Prisma. Check microphone input and permissions.";
+  }
+  else if (ready && prisma?.nonzero_frames && !prisma.speech_starts && !prisma.processing && !prisma.finals) {
+    status = "Audio was sent to Prisma. No speech event has arrived. Speak and pause, or tap Finish speaking.";
+  }
+  $("voice-diagnostic-status").textContent = status;
+  $("voice-mic-frames").textContent = `${microphoneFrames} captured · ${nonzeroMicrophoneFrames} with signal · ${droppedAudioFrames} dropped`;
+  $("voice-prisma-frames").textContent = prisma
+    ? `${serverAudioChunks ?? "—"} server chunks · ${prisma.frames} sent · ${prisma.nonzero_frames} with signal · peak ${prisma.peak_dbfs ?? "—"} dBFS`
+    : `Server chunks received · ${serverAudioChunks ?? "—"}`;
+  $("voice-prisma-events").textContent = prisma
+    ? `${prisma.speech_starts} started · ${prisma.processing} processing · ${prisma.partials} partial · ${prisma.finals} final · ${prisma.empty} empty · ${prisma.errors} errors · ${prisma.other} other · ${prisma.commits} commits`
+    : "—";
+}
+
+function clearPartialTranscript() {
+  $("partial-transcript").textContent = "";
+  $("partial-transcript").hidden = true;
+}
+
 function receive(message) {
   switch (message.type) {
     case "ready":
       clearTimeout(heartbeat);
       token = message.session;
       ready = true;
+      voiceConnection = "Connected to Prisma";
+      serverAudioChunks = prismaDiagnostics = undefined;
+      if (config?.mode === "real") transmit({type: "heartbeat"});
+      renderVoiceDiagnostics();
       setPhase("Listening");
       break;
     case "heartbeat":
       attempts = 0;
+      serverAudioChunks = message.audio_chunks;
+      prismaDiagnostics = message.prisma;
+      renderVoiceDiagnostics();
       break;
     case "update":
       draft = message.form;
@@ -259,7 +296,13 @@ function receive(message) {
       $("assistant").textContent = message.text;
       break;
     case "transcript":
-      $("transcript").textContent = message.text;
+      if (message.final) {
+        $("transcript").textContent = message.text;
+        clearPartialTranscript();
+      } else {
+        $("partial-transcript").textContent = `Partial · ${message.text}`;
+        $("partial-transcript").hidden = false;
+      }
       break;
     case "audio":
       playPCM(message);
@@ -270,6 +313,10 @@ function receive(message) {
       break;
     case "error":
       notice(message.message);
+      if (!ready) {
+        voiceConnection = message.message;
+        renderVoiceDiagnostics();
+      }
       if (message.fatal) stop(true);
       else if (phase === "Processing") setPhase("Listening");
       break;
@@ -309,6 +356,9 @@ function connect() {
     socket = null;
     ready = false;
     clearPlayback();
+    clearPartialTranscript();
+    if (!voiceConnection.includes("rejected")) voiceConnection = "Prisma disconnected. Reconnecting…";
+    renderVoiceDiagnostics();
     scheduleReconnect();
     void checkConnection();
   };
@@ -332,6 +382,9 @@ function capture({pcm, rms}) {
     captureTimer = null;
     $("microphone-status").textContent = "Microphone · capturing audio";
   }
+  microphoneFrames += 1;
+  if (rms > 0) nonzeroMicrophoneFrames += 1;
+  if (microphoneFrames === 1 || microphoneFrames % 32 === 0) renderVoiceDiagnostics();
   draw(rms);
   const now = performance.now();
   if (rms >= .035) {
@@ -343,7 +396,11 @@ function capture({pcm, rms}) {
   } else {
     sustained = 0;
   }
-  if (!ready || socket.bufferedAmount > 128000) return;
+  if (!ready) return;
+  if (socket.bufferedAmount > 128000) {
+    droppedAudioFrames += 1;
+    return;
+  }
   const data = btoa(String.fromCharCode(...new Uint8Array(pcm)));
   transmit({type: "audio", data});
 }
@@ -351,6 +408,10 @@ function capture({pcm, rms}) {
 async function start() {
   if (active || starting || !online || config?.voice_error) return;
   notice("");
+  microphoneFrames = nonzeroMicrophoneFrames = droppedAudioFrames = 0;
+  serverAudioChunks = prismaDiagnostics = undefined;
+  voiceConnection = "Opening microphone and Prisma connection…";
+  renderVoiceDiagnostics();
   starting = true;
   const thisRun = ++voiceRun;
   setPhase("Starting");
@@ -431,6 +492,9 @@ function stop(preserveDraft = false) {
   if (context?.state !== "closed") void context?.close();
   context = stream = microphone = worklet = mutedOutput = null;
   token = null;
+  clearPartialTranscript();
+  if (!preserveDraft) voiceConnection = "Idle";
+  renderVoiceDiagnostics();
   lastSpeech = sustained = 0;
   if (!preserveDraft) {
     draft = {};

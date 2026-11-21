@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 from contextlib import asynccontextmanager
 from threading import Event
 
@@ -167,3 +168,60 @@ def test_browser_disconnected_state_cleans_provider_without_writes(tmp_path, mon
     assert provider.closed and provider.interrupted
     assert not writes_after_disconnect
     assert "Voice session failed" not in caplog.text
+
+
+def test_fastapi_prisma_audio_transcript_and_diagnostics(tmp_path, monkeypatch):
+    from backend.gnani.provider import PrismaStream
+
+    partial = "Unconfirmed synthetic draft"
+    final = "Beneficiary ID DEMO-24, newborn, weight 2.8"
+    pcm = b"\x00\x20" * 512
+
+    class PrismaSocket:
+        def __init__(self):
+            self.events = asyncio.Queue()
+
+        async def send(self, message):
+            if isinstance(message, bytes):
+                assert message == pcm
+                await self.events.put({"type": "speech_start"})
+                await self.events.put({"type": "transcript", "text": partial, "is_final": False})
+            else:
+                assert json.loads(message) == {"type": "commit"}
+                await self.events.put({"type": "processing"})
+                await self.events.put({"type": "transcript", "text": final, "is_final": True})
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return json.dumps(await self.events.get())
+
+    class Voice(ProviderDouble):
+        @asynccontextmanager
+        async def listen(self, _language):
+            yield PrismaStream(PrismaSocket())
+
+    monkeypatch.setattr(live, "load_voice", Voice)
+    monkeypatch.setenv("APP_MODE", "real")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "provider-pipeline.db"))
+    monkeypatch.setenv("DATA_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+
+    with TestClient(live.create_live_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            socket.send_json({"type": "hello"})
+            assert [socket.receive_json()["type"] for _ in range(4)] == ["ready", "update", "assistant", "audio"]
+            socket.send_json({"type": "audio", "data": base64.b64encode(pcm).decode()})
+            assert socket.receive_json() == {"type": "transcript", "text": partial, "final": False}
+            socket.send_json({"type": "heartbeat"})
+            heartbeat = socket.receive_json()
+            assert heartbeat["audio_chunks"] == 1
+            assert heartbeat["prisma"]["nonzero_frames"] == 1
+            assert heartbeat["prisma"]["partials"] == 1
+            assert partial not in json.dumps(heartbeat)
+            socket.send_json({"type": "finish_utterance"})
+            assert socket.receive_json() == {"type": "transcript", "text": final, "final": True}
+            assert socket.receive_json()["state"] == "PROCESSING"
+            assert socket.receive_json()["state"] == "CONFIRMING"
+            assert not client.get("/api/visits").json()

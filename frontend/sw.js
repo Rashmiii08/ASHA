@@ -1,4 +1,4 @@
-const cacheName = "field-register-shell-v3";
+const cacheName = "field-register-shell-v4";
 const shell = ["/", "/app.js", "/styles.css", "/audio-worklet.js", "/manifest.json",
   "/icon-192.png", "/icon-512.png"];
 self.addEventListener("install", event => {

@@ -264,3 +264,28 @@ def test_prisma_paces_binary_frames_from_legacy_batches():
     asyncio.run(provider.PrismaStream(socket).send_pcm(bytes(3072)))
     assert socket.sent == [bytes(1024)] * 3
     assert all(later - earlier >= 0.020 for earlier, later in zip(sent_at, sent_at[1:]))
+
+
+def test_prisma_partial_and_recoverable_error_do_not_close_stream():
+    socket = MockSocket([
+        {"type": "speech_start"},
+        {"type": "transcript", "text": "Synthetic partial", "is_final": False},
+        {"type": "error", "message": "Sensitive provider detail"},
+        {"type": "processing"},
+        {"type": "transcript", "text": "Synthetic final", "is_final": True},
+        {"type": "transcript", "text": ""},
+    ])
+
+    async def exercise():
+        stream = provider.PrismaStream(socket)
+        await stream.send_pcm(bytes(1024))
+        await stream.send_pcm(b"\x00\x20" * 512)
+        assert [item async for item in stream.transcripts()] == [
+            ("Synthetic partial", False), ("Synthetic final", True),
+        ]
+        assert stream.diagnostics() == {
+            "frames": 2, "nonzero_frames": 1, "peak_dbfs": -12.0, "speech_starts": 1,
+            "processing": 1, "partials": 1, "finals": 1, "empty": 1, "errors": 1, "other": 0, "commits": 0,
+        }
+
+    asyncio.run(exercise())

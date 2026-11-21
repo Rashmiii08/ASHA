@@ -68,8 +68,17 @@
             </button><canvas id="wave" height="52" width="320" aria-hidden="true"></canvas></div>
             <div class="voice-actions"><button class="secondary" id="stop-voice" disabled>Stop session</button><button class="secondary" id="interrupt" disabled>Interrupt</button><button type="button" class="secondary" id="finish-utterance" hidden disabled>Finish speaking</button></div>
             <p id="timing" class="muted">First audio · —</p>
+            <details id="voice-diagnostics" hidden>
+              <summary>Voice diagnostics</summary>
+              <p id="voice-diagnostic-status"></p>
+              <dl>
+                <div><dt>Microphone frames</dt><dd id="voice-mic-frames">0</dd></div>
+                <div><dt>Prisma audio frames</dt><dd id="voice-prisma-frames">—</dd></div>
+                <div><dt>Prisma speech events</dt><dd id="voice-prisma-events">—</dd></div>
+              </dl>
+            </details>
             <div class="transcript">
-              <h3>Transcript</h3><p id="transcript">Your words will appear here.</p>
+              <h3>Transcript</h3><p id="transcript">Your words will appear here.</p><p id="partial-transcript" hidden></p>
               <h3>Assistant</h3><p id="assistant" aria-live="polite">Start a session to begin.</p>
             </div>
             <form id="demo-form" hidden>

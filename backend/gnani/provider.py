@@ -29,6 +29,12 @@ class GnaniConnectionError(ConnectionError):
     """A transport failure safe to report without exposing provider details."""
 
 
+class GnaniUpgradeError(GnaniConnectionError):
+    def __init__(self, status: int):
+        super().__init__("Gnani WebSocket upgrade was rejected.")
+        self.status = status
+
+
 class GnaniTransport:
     """Open provider sockets using the account key supplied by the backend."""
 
@@ -66,7 +72,7 @@ class GnaniTransport:
         except InvalidStatus as exc:
             status = exc.response.status_code
             LOG.warning("Gnani %s WebSocket upgrade rejected: HTTP %d", service, status)
-            raise GnaniConnectionError(f"Gnani {service} WebSocket upgrade was rejected.") from None
+            raise GnaniUpgradeError(status) from None
         except (OSError, WebSocketException) as exc:
             LOG.warning("Gnani %s WebSocket failed: %s", service, type(exc).__name__)
             raise GnaniConnectionError(f"Gnani {service} WebSocket connection failed.") from None
@@ -97,6 +103,10 @@ class PrismaStream:
         self._next_frame_at = 0.0
         self._frames_sent = 0
         self._silent_frames = 0
+        self._nonzero_frames = 0
+        self._diagnostic_peak = 0
+        self._events = dict.fromkeys(("speech_start", "processing", "partial", "final", "empty", "error", "other"), 0)
+        self._commits = 0
         self._max_rms = 0.0
         self._peak = 0
 
@@ -115,8 +125,7 @@ class PrismaStream:
             await self._socket.send(frame)
             del self._buffer[:FRAME_BYTES]
             self._frames_sent += 1
-            if LOG.isEnabledFor(logging.INFO):
-                self._record_level(frame)
+            self._record_level(frame)
             # Catch up after small scheduling delays without sending frames back-to-back.
             self._next_frame_at = max(self._next_frame_at + FRAME_SECONDS, loop.time() + 0.028)
 
@@ -126,6 +135,8 @@ class PrismaStream:
             peak = max(peak, abs(sample))
             energy += sample * sample
         self._silent_frames += peak == 0
+        self._nonzero_frames += peak != 0
+        self._diagnostic_peak = max(self._diagnostic_peak, peak)
         self._max_rms = max(self._max_rms, math.sqrt(energy / FRAME_SAMPLES))
         self._peak = max(self._peak, peak)
         if self._frames_sent in (1, 32) or self._frames_sent % 300 == 0:
@@ -142,7 +153,23 @@ class PrismaStream:
         if self._buffer:
             await self.send_pcm(bytes(FRAME_BYTES - len(self._buffer)))
         await self._socket.send(json.dumps({"type": "commit"}))
+        self._commits += 1
         LOG.info("Prisma utterance commit sent")
+
+    def diagnostics(self) -> dict:
+        return {
+            "frames": self._frames_sent,
+            "nonzero_frames": self._nonzero_frames,
+            "peak_dbfs": round(20 * math.log10(self._diagnostic_peak / 32768), 1) if self._diagnostic_peak else None,
+            "speech_starts": self._events["speech_start"],
+            "processing": self._events["processing"],
+            "partials": self._events["partial"],
+            "finals": self._events["final"],
+            "empty": self._events["empty"],
+            "errors": self._events["error"],
+            "other": self._events["other"],
+            "commits": self._commits,
+        }
 
     async def transcripts(self) -> AsyncIterator[tuple[str, bool]]:
         async for raw in self._socket:
@@ -150,16 +177,26 @@ class PrismaStream:
             kind = message.get("type")
             if kind in ("speech_start", "processing", "transcript", "error"):
                 LOG.info("Prisma event: %s", kind)
-            if kind == "error":
-                raise GnaniProtocolError("Gnani Prisma reported a transcription error.")
-            if kind == "transcript":
-                payload = message.get("text")
-                if not isinstance(payload, str) or message.get("is_final", True) is not True:
-                    raise GnaniProtocolError("Gnani Prisma sent an invalid final transcript.")
-                if payload.strip():
-                    yield payload, True
-                else:
+            if kind in ("speech_start", "processing", "error"):
+                # A provider error for one utterance can leave the stream open.
+                self._events[kind] += 1
+                continue
+            if kind != "transcript":
+                self._events["other"] += 1
+                continue
+            payload = message.get("text")
+            final = message.get("is_final", True)
+            if not isinstance(payload, str) or not isinstance(final, bool):
+                self._events["error"] += 1
+                LOG.warning("Prisma sent a malformed transcript event")
+                continue
+            if not payload.strip():
+                if final:
+                    self._events["empty"] += 1
                     LOG.info("Prisma final transcript was empty")
+                continue
+            self._events["final" if final else "partial"] += 1
+            yield payload, final
 
 
 class GnaniVoice(GnaniTransport):

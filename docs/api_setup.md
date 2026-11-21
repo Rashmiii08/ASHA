@@ -16,7 +16,7 @@ Use synthetic visit notes when sending data to external providers. Keep keys in 
 | Prisma | `prisma-v3.0` | `wss://api.vachana.ai/stt/v3/stream` | `x-api-key-id` |
 | Timbre | `timbre-v3.0` | `wss://api.vachana.ai/api/v1/tts` | `X-API-Key-ID` |
 
-Prisma is configured through upgrade headers and acknowledges with `connected`. The browser renders mono, little-endian, signed PCM16 at 16 kHz in 1,024-byte (32 ms) frames. The adapter paces the binary WebSocket frames, keeps silence flowing between words, uses the documented web-microphone VAD threshold of 0.5 with 700 ms of trailing silence, and submits completed `transcript` segments to the ASHA dialogue. The supplied Prisma PDF was truncated after page 19 of 34. The recovered pages and published SDK document completed segments. Support for a distinct partial-transcript event is pending a complete reference.
+Prisma is configured through upgrade headers and acknowledges with `connected`. The browser renders mono, little-endian, signed PCM16 at 16 kHz in 1,024-byte (32 ms) frames. The adapter paces the binary WebSocket frames, keeps silence flowing between words, uses the documented web-microphone VAD threshold of 0.5 with 700 ms of trailing silence, and submits completed `transcript` segments to the ASHA dialogue. The supplied Prisma PDF was truncated after page 19 of 34. The recovered pages and published SDK document completed segments. The app can display a transcript frame marked `is_final: false` separately from final text. The recovered reference does not define a distinct partial event or confirm that this endpoint emits partials.
 
 Timbre uses the documented v3.0 voice Shivani and requests raw 16 kHz mono PCM16. The adapter streams base64-decoded `audio` messages and stops on `complete`, cancellation or error. The existing ASHA language picker offers English and Hindi. Provider request construction for Kannada is covered by a mock test.
 
@@ -30,7 +30,9 @@ Generate a Fernet key privately with `python -c "from cryptography.fernet import
 
 ## If the browser shows Listening without a transcript
 
-Start Uvicorn with the app loggers enabled at INFO. Uvicorn's access log alone does not include the app's audio diagnostics.
+Open **Voice diagnostics** in the active visit. It shows microphone capture, server receipt, Prisma frames written, peak signal level and counts for speech starts, in-progress processing, final or partial results, empty results and provider errors. These counts update on the WebSocket heartbeat. A frame written to Prisma is not a provider acknowledgement. The panel never displays audio, credentials or transcript text.
+
+For deeper troubleshooting, start Uvicorn with the app loggers enabled at INFO. Uvicorn's access log alone does not include the app's audio diagnostics.
 
 ```bash
 python -c "import logging, uvicorn; logging.basicConfig(level=logging.INFO); uvicorn.run('backend.live:create_live_app', factory=True, host='127.0.0.1', port=8765, ws_max_size=32768)"
